@@ -2,8 +2,10 @@ import os
 import html
 import logging
 from io import BytesIO
+import threading
 
 import qrcode
+import uvicorn
 
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
@@ -33,9 +35,6 @@ BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
 BANK_BIN = os.environ.get("BANK_BIN", "970422")
-
-# Render tự cung cấp RENDER_EXTERNAL_URL; hoặc tự đặt WEBHOOK_URL
-WEBHOOK_BASE = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -639,36 +638,18 @@ telegram_app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 telegram_app.add_handler(CallbackQueryHandler(handle_callback))
 
 
-# ==================== FASTAPI ====================
-@app.on_event("startup")
-async def startup_event():
-    await telegram_app.initialize()
-    if WEBHOOK_BASE:
-        await telegram_app.bot.set_webhook(url=WEBHOOK_BASE.rstrip("/") + "/")
-        logger.info(f"Đã đặt webhook: {WEBHOOK_BASE}")
-    logger.info("Bot đã khởi tạo thành công.")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await telegram_app.shutdown()
-
-
+# ==================== FASTAPI & MAIN ====================
 @app.get("/")
-async def health():
+def health():
     return {"status": "running"}
 
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
-@app.post("/")
-async def webhook(request: Request):
-    update = Update.de_json(await request.json(), telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"status": "ok"}
-    if __name__ == "__main__":
-    # Khởi tạo application với token từ biến môi trường
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # --- (Các handler / lệnh của bot giữ nguyên ở đây) ---
+if __name__ == "__main__":
+    # Chạy Web Server ở luồng riêng để đáp ứng yêu cầu port binding của Render
+    threading.Thread(target=run_web, daemon=True).start()
     
-    # Chạy chế độ Polling (Bot tự động đi kéo tin nhắn về)
-    application.run_polling()
+    # Chạy Bot Telegram dạng Polling ở luồng chính
+    telegram_app.run_polling()
