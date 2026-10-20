@@ -4,6 +4,7 @@ from io import BytesIO
 import qrcode
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
@@ -12,7 +13,6 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFi
     filters,
 )
 from supabase import create_client, Client
-
 # ==================== CẤU HÌNH LOGGING ====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -204,12 +204,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-     await query.message.reply_photo(
-    photo=InputFile(qr_image, filename=f"qr_dh{order_id}.png"),
-    caption=caption,
-    reply_markup=kb,
-    parse_mode="HTML",
-)
+        await query.message.reply_photo(
+           photo=InputFile(qr_image, filename=f"qr_dh{order_id}.png"),
+           caption=caption,
+           reply_markup=kb,
+           parse_mode="HTML",
+                             )
         )
         await query.answer()
 
