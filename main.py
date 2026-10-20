@@ -1,651 +1,393 @@
-!pip uninstall -y python-telegram-bot telegram -q
-!pip install -U --force-reinstall "python-telegram-bot==22.8" nest_asyncio requests qrcode[pil] pillow -q
-import nest_asyncio
-nest_asyncio.apply()
-
 import os
-import json
 import logging
-import uuid
-import requests
-import asyncio
-from datetime import datetime
 from io import BytesIO
-
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputFile, ReplyKeyboardMarkup, KeyboardButton
-)
+import qrcode
+from fastapi import FastAPI, Request
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
-from telegram.constants import ParseMode
+from supabase import create_client, Client
 
-# ==================== CẤU HÌNH ====================
-BOT_TOKEN = "8958149815:AAElJ97BtD3IOWiXMH0iyzm0SJQczOPWkzg"          # ← Thay token
-ADMIN_ID = 8428411178                       # ← Thay Telegram ID của bạn
-
-BANK_INFO = {
-    "bank_id": "970422",                   # BIN Vietcombank (đổi theo ngân hàng)
-    "bank_name": "MB BANK",
-    "account_number": "0352836546",
-    "account_name": "Phan Hoàng An",
-    "template": "compact2"
-}
-
-PRODUCTS = {
-    "key_1m": {
-        "name": "Premium Key 1 Tháng",
-        "price": 99000,
-        "description": "Key Premium dùng trong 30 ngày",
-        "stock": ["KEY-1M-AAAA-1111", "KEY-1M-BBBB-2222", "KEY-1M-CCCC-3333"]
-    },
-    "key_3m": {
-        "name": "Premium Key 3 Tháng",
-        "price": 249000,
-        "description": "Key Premium dùng trong 90 ngày",
-        "stock": ["KEY-3M-XXXX-4444", "KEY-3M-YYYY-5555"]
-    },
-    "key_lifetime": {
-        "name": "Premium Key Vĩnh Viễn",
-        "price": 499000,
-        "description": "Key Premium không giới hạn thời gian",
-        "stock": ["KEY-LT-ZZZZ-6666"]
-    }
-}
-
-ORDERS_FILE = "orders.json"
-USERS_FILE = "users.json"
-
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# ==================== CẤU HÌNH LOGGING ====================
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== HELPER ====================
-def load_json(filename: str, default=None):
-    if default is None:
-        default = {}
-    if os.path.exists(filename):
-        try:
-            with open(filename, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return default
-    return default
+# ==================== LẤY BIẾN MÔI TRƯỜNG ====================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # ID Telegram của Admin
 
-def save_json(filename: str, data):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
+ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
+ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
+BANK_BIN = os.environ.get("BANK_BIN", "970422")
 
-def generate_order_id() -> str:
-    return f"ORD-{datetime.now().strftime('%y%m%d')}-{str(uuid.uuid4())[:6].upper()}"
+# Khởi tạo Supabase Client
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def create_vietqr_image(amount: int, content: str, order_id: str) -> BytesIO:
-    transfer_content = f"{content} {order_id}".replace(" ", "%20")
-    account_name = BANK_INFO["account_name"].replace(" ", "%20")
-    url = (
-        f"https://img.vietqr.io/image/"
-        f"{BANK_INFO['bank_id']}-{BANK_INFO['account_number']}-{BANK_INFO['template']}.jpg"
-        f"?amount={amount}&addInfo={transfer_content}&accountName={account_name}"
+# Khởi tạo FastAPI & Telegram Bot Application
+app = FastAPI()
+telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+
+# ==================== HÀM TRỢ GIÚP ====================
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+
+def generate_vietqr(amount: int, content: str) -> BytesIO:
+    """Tạo mã QR VietQR chuẩn"""
+    payload = (
+        f"00020101021238570010A00000072701270006{BANK_BIN}01{len(ACCOUNT_NUMBER):02d}{ACCOUNT_NUMBER}"
+        f"0208QRIBFTTA530370454{len(str(amount)):02d}{amount}"
+        f"5802VN62{len(content)+4:02d}08{len(content):02d}{content}6304"
     )
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        bio = BytesIO(response.content)
-        bio.name = f"qr_{order_id}.jpg"
-        return bio
-    except Exception as e:
-        logger.error(f"Lỗi tạo VietQR: {e}")
-        import qrcode
-        from PIL import Image
-        qr = qrcode.QRCode(version=1, box_size=8, border=2)
-        qr.add_data(f"{BANK_INFO['account_number']}|{amount}|{content} {order_id}")
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        bio = BytesIO()
-        img.save(bio, "PNG")
-        bio.seek(0)
-        bio.name = f"qr_{order_id}.png"
-        return bio
+    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+    qr.add_data(payload)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
 
-# ==================== USER HANDLERS ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    users = load_json(USERS_FILE, {})
-    users[str(user.id)] = {
-        "username": user.username,
-        "full_name": user.full_name,
-        "joined": datetime.now().isoformat()
-    }
-    save_json(USERS_FILE, users)
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio
 
-    text = (
-        f"Xin chào <b>{user.first_name}</b>!\n\n"
-        "Chào mừng đến <b>Key Store Pro</b>\n"
-        "Mua key nhanh • Thanh toán VietQR • Duyệt thủ công bởi Admin"
+
+def get_available_keys_count(product_id: int) -> int:
+    res = (
+        supabase.table("keys")
+        .select("id", count="exact")
+        .eq("product_id", product_id)
+        .eq("is_sold", False)
+        .execute()
     )
-    keyboard = [
-        [KeyboardButton("🛒 Mua Key"), KeyboardButton("📋 Đơn hàng của tôi")],
-        [KeyboardButton("ℹ️ Hướng dẫn"), KeyboardButton("📞 Liên hệ Admin")]
-    ]
-    if user.id == ADMIN_ID:
-        keyboard.append([KeyboardButton("🛠 Admin Panel")])
+    return res.count if res.count is not None else 0
 
-    await update.message.reply_text(
-        text, parse_mode=ParseMode.HTML,
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
 
-async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "<b>🛒 Danh sách sản phẩm</b>\n\n"
-    keyboard = []
-    for pid, p in PRODUCTS.items():
-        stock = len(p["stock"])
-        status = f"✅ Còn {stock}" if stock > 0 else "❌ Hết hàng"
-        text += f"• <b>{p['name']}</b>\n  💰 <code>{p['price']:,}đ</code> | {status}\n  {p['description']}\n\n"
-        if stock > 0:
-            keyboard.append([InlineKeyboardButton(
-                f"Mua {p['name']} - {p['price']:,}đ", callback_data=f"buy_{pid}"
-            )])
-    if not keyboard:
-        text += "⚠️ Hiện tại tất cả sản phẩm đều hết hàng."
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    pid = query.data.replace("buy_", "")
-    if pid not in PRODUCTS or not PRODUCTS[pid]["stock"]:
-        await query.edit_message_text("❌ Sản phẩm không tồn tại hoặc đã hết hàng.")
-        return
-
-    product = PRODUCTS[pid]
-    order_id = generate_order_id()
-    amount = product["price"]
-    content = f"MUA{pid.upper()}"
-
-    orders = load_json(ORDERS_FILE, {})
-    orders[order_id] = {
-        "user_id": query.from_user.id,
-        "username": query.from_user.username,
-        "full_name": query.from_user.full_name,
-        "product_id": pid,
-        "product_name": product["name"],
-        "amount": amount,
-        "status": "pending_payment",
-        "created_at": datetime.now().isoformat(),
-        "key": None
-    }
-    save_json(ORDERS_FILE, orders)
-
-    qr_image = create_vietqr_image(amount, content, order_id)
-
-    caption = (
-        f"<b>📦 Đơn hàng: <code>{order_id}</code></b>\n\n"
-        f"Sản phẩm: <b>{product['name']}</b>\n"
-        f"Số tiền: <code>{amount:,} VNĐ</code>\n\n"
-        f"<b>Thông tin chuyển khoản:</b>\n"
-        f"• Ngân hàng: {BANK_INFO['bank_name']}\n"
-        f"• Số TK: <code>{BANK_INFO['account_number']}</code>\n"
-        f"• Chủ TK: {BANK_INFO['account_name']}\n"
-        f"• Nội dung: <code>{content} {order_id}</code>\n\n"
-        f"⚠️ <b>Vui lòng chuyển đúng nội dung</b> để được duyệt nhanh."
-    )
-    keyboard = [
-        [InlineKeyboardButton("✅ Tôi đã thanh toán", callback_data=f"paid_{order_id}")],
-        [InlineKeyboardButton("❌ Hủy đơn", callback_data=f"cancel_{order_id}")]
-    ]
-    await query.message.reply_photo(
-        photo=InputFile(qr_image), caption=caption,
-        parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    await query.edit_message_text(f"✅ Đã tạo đơn <code>{order_id}</code>. Vui lòng xem tin nhắn bên dưới.", parse_mode=ParseMode.HTML)
-
-async def paid_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    order_id = query.data.replace("paid_", "")
-    orders = load_json(ORDERS_FILE, {})
-
-    if order_id not in orders or orders[order_id]["status"] != "pending_payment":
-        await query.answer("Đơn hàng không hợp lệ hoặc đã xử lý.", show_alert=True)
-        return
-
-    order = orders[order_id]
-    order["status"] = "waiting_admin"
-    order["paid_at"] = datetime.now().isoformat()
-    save_json(ORDERS_FILE, orders)
-
-    admin_text = (
-        f"🔔 <b>ĐƠN HÀNG MỚI CẦN DUYỆT</b>\n\n"
-        f"Mã: <code>{order_id}</code>\n"
-        f"Khách: {order['full_name']} (@{order.get('username') or 'N/A'})\n"
-        f"ID: <code>{order['user_id']}</code>\n"
-        f"Sản phẩm: <b>{order['product_name']}</b>\n"
-        f"Số tiền: <code>{order['amount']:,}đ</code>\n"
-        f"Thời gian: {order['paid_at']}"
-    )
-    keyboard = [[
-        InlineKeyboardButton("✅ Duyệt & Gửi Key", callback_data=f"approve_{order_id}"),
-        InlineKeyboardButton("❌ Từ chối", callback_data=f"reject_{order_id}")
-    ]]
-    await context.bot.send_message(ADMIN_ID, admin_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    await query.edit_message_caption(
-        caption=query.message.caption + "\n\n⏳ <b>Đã gửi cho Admin. Vui lòng chờ duyệt.</b>",
-        parse_mode=ParseMode.HTML
-    )
-
-async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    order_id = query.data.replace("cancel_", "")
-    orders = load_json(ORDERS_FILE, {})
-    if order_id in orders and orders[order_id]["status"] == "pending_payment":
-        orders[order_id]["status"] = "cancelled"
-        save_json(ORDERS_FILE, orders)
-        await query.edit_message_caption(caption=f"🚫 Đã hủy đơn <code>{order_id}</code>.", parse_mode=ParseMode.HTML)
-    else:
-        await query.answer("Không thể hủy đơn này.", show_alert=True)
-
-async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ==================== CÁC XỬ LÝ DÀNH CHO USER ====================
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    orders = load_json(ORDERS_FILE, {})
-    user_orders = [(oid, o) for oid, o in orders.items() if o["user_id"] == user_id]
-    if not user_orders:
-        await update.message.reply_text("Bạn chưa có đơn hàng nào.")
-        return
-    text = "<b>📋 Đơn hàng của bạn</b>\n\n"
-    status_map = {
-        "pending_payment": "⏳ Chờ thanh toán",
-        "waiting_admin": "🕐 Chờ Admin duyệt",
-        "completed": "✅ Hoàn thành",
-        "rejected": "❌ Từ chối",
-        "cancelled": "🚫 Đã hủy"
-    }
-    for oid, o in sorted(user_orders, key=lambda x: x[1]["created_at"], reverse=True)[:8]:
-        text += f"• <code>{oid}</code> | {o['product_name']}\n  {status_map.get(o['status'], o['status'])} | {o['amount']:,}đ\n"
-        if o.get("key"):
-            text += f"  🔑 <code>{o['key']}</code>\n"
-        text += "\n"
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-async def guide(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "<b>📖 Hướng dẫn mua hàng</b>\n\n"
-        "1. Nhấn <b>🛒 Mua Key</b>\n"
-        "2. Chọn sản phẩm\n"
-        "3. Quét mã VietQR hoặc chuyển khoản đúng nội dung\n"
-        "4. Nhấn <b>Tôi đã thanh toán</b>\n"
-        "5. Chờ Admin duyệt (thường 1-5 phút)\n"
-        "6. Nhận key ngay trong chat\n\n"
-        "⚠️ Phải chuyển <b>đúng nội dung</b> để được duyệt nhanh nhất."
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"📞 Liên hệ Admin: tg://user?id={ADMIN_ID}")
-
-# ==================== ADMIN PANEL ====================
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    text = "<b>🛠 ADMIN PANEL</b>\n\nChọn chức năng bên dưới:"
     keyboard = [
-        [InlineKeyboardButton("📊 Thống kê", callback_data="admin_stats"),
-         InlineKeyboardButton("📦 Tồn kho", callback_data="admin_stock")],
-        [InlineKeyboardButton("🕐 Đơn chờ duyệt", callback_data="admin_pending"),
-         InlineKeyboardButton("📋 Tất cả đơn", callback_data="admin_all_orders")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast_info"),
-         InlineKeyboardButton("➕ Thêm Key", callback_data="admin_addkey_info")]
+        [InlineKeyboardButton("🛒 Xem sản phẩm", callback_data="show_products")],
+        [InlineKeyboardButton("📦 Đơn hàng của tôi", callback_data="my_orders")],
     ]
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    if is_admin(user_id):
+        keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin_panel")])
 
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = (
+        f"Xin chào {update.effective_user.first_name}!\n"
+        "Chào mừng đến cửa hàng Game Key.\nChọn chức năng:"
+    )
+
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(text, reply_markup=reply_markup)
+
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("Bạn không có quyền!", show_alert=True)
-        return
-
     data = query.data
-    if data == "admin_stats":
-        orders = load_json(ORDERS_FILE, {})
-        users = load_json(USERS_FILE, {})
-        completed = [o for o in orders.values() if o["status"] == "completed"]
-        revenue = sum(o["amount"] for o in completed)
-        pending = sum(1 for o in orders.values() if o["status"] == "waiting_admin")
-        text = (
-            f"<b>📊 THỐNG KÊ</b>\n\n"
-            f"👥 Tổng user: <b>{len(users)}</b>\n"
-            f"📦 Tổng đơn: <b>{len(orders)}</b>\n"
-            f"✅ Hoàn thành: <b>{len(completed)}</b>\n"
-            f"🕐 Chờ duyệt: <b>{pending}</b>\n"
-            f"💰 Doanh thu: <b>{revenue:,} VNĐ</b>"
-        )
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+    user = query.from_user
 
-    elif data == "admin_stock":
-        text = "<b>📦 TỒN KHO KEY</b>\n\n"
-        for pid, p in PRODUCTS.items():
-            text += f"• <b>{p['name']}</b>\n  Còn lại: <code>{len(p['stock'])}</code> key\n\n"
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+    if data == "show_products":
+        res = supabase.table("products").select("*").execute()
+        products = res.data or []
+
+        if not products:
+            await query.message.edit_text("Hiện chưa có sản phẩm nào.")
+            return
+
+        text = "🎮 <b>Danh sách Game Key:</b>\n\n"
+        buttons = []
+        for p in products:
+            pid = p["id"]
+            name = p["name"]
+            price = p["price"]
+            desc = p.get("description", "")
+            stock = get_available_keys_count(pid)
+
+            text += f"<b>{name}</b>\n💰 Giá: {price:,}đ\n📦 Còn: {stock} key\n"
+            if desc:
+                text += f"📝 {desc}\n"
+            text += "─" * 20 + "\n"
+
+            if stock > 0:
+                buttons.append(
+                    [InlineKeyboardButton(f"Mua {name} - {price:,}đ", callback_data=f"buy_{pid}")]
+                )
+
+        buttons.append([InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")])
+        await query.message.edit_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
+        )
+
+    elif data.startswith("buy_"):
+        product_id = int(data.split("_")[1])
+        stock = get_available_keys_count(product_id)
+        if stock <= 0:
+            await query.answer("Sản phẩm đã hết hàng!", show_alert=True)
+            return
+
+        res = supabase.table("products").select("*").eq("id", product_id).execute()
+        if not res.data:
+            await query.answer("Sản phẩm không tồn tại!", show_alert=True)
+            return
+
+        product = res.data[0]
+        name = product["name"]
+        price = product["price"]
+
+        # Tạo đơn hàng mới trong DB
+        order_res = (
+            supabase.table("orders")
+            .insert({"user_id": user.id, "product_id": product_id, "status": "pending"})
+            .execute()
+        )
+        order_id = order_res.data[0]["id"]
+        content = f"DH{order_id}"
+
+        # Tạo QR thanh toán
+        qr_image = generate_vietqr(price, content)
+
+        # Gửi thông báo đến Admin
+        try:
+            admin_text = (
+                f"🔔 <b>ĐƠN HÀNG MỚI #{order_id}</b>\n\n"
+                f"👤 Khách: <a href='tg://user?id={user.id}'>{user.full_name}</a>\n"
+                f"🆔 ID: <code>{user.id}</code>\n"
+                f"🎮 {name}\n"
+                f"💰 {price:,}đ"
+            )
+            admin_kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"✅ Duyệt đơn #{order_id}", callback_data=f"approve_{order_id}")]]
+            )
+            await context.bot.send_message(
+                ADMIN_ID, admin_text, reply_markup=admin_kb, parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Lỗi gửi thông báo cho Admin: {e}")
+
+        caption = (
+            f"✅ <b>Đã tạo đơn hàng #{order_id}</b>\n\n"
+            f"Sản phẩm: <b>{name}</b>\n"
+            f"Giá: <b>{price:,}đ</b>\n\n"
+            f"💳 <b>Thông tin chuyển khoản:</b>\n"
+            f"Ngân hàng: {BANK_NAME}\n"
+            f"Số tài khoản: <code>{ACCOUNT_NUMBER}</code>\n"
+            f"Chủ tài khoản: {ACCOUNT_NAME}\n"
+            f"Nội dung: <code>{content}</code>\n\n"
+            f"Hoặc quét mã QR bên dưới để thanh toán nhanh.\n"
+            f"Sau khi chuyển khoản xong, hãy bấm nút xác nhận."
+        )
+
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Tôi đã chuyển khoản", callback_data=f"confirm_paid_{order_id}")],
+                [InlineKeyboardButton("⬅️ Quay lại", callback_data="show_products")],
+            ]
+        )
+
+        await query.message.reply_photo(
+            photo=BufferedInputFile(qr_image.read(), filename=f"qr_dh{order_id}.png"),
+            caption=caption,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await query.answer()
+
+    elif data.startswith("confirm_paid_"):
+        order_id = int(data.split("_")[2])
+        res = supabase.table("orders").select("*, products(name, price)").eq("id", order_id).execute()
+
+        if not res.data:
+            await query.answer("Đơn hàng không tồn tại!", show_alert=True)
+            return
+
+        order = res.data[0]
+        if order["user_id"] != user.id:
+            await query.answer("Đây không phải đơn của bạn!", show_alert=True)
+            return
+
+        if order["status"] != "pending":
+            await query.answer("Đơn hàng đã được xử lý!", show_alert=True)
+            return
+
+        try:
+            text = (
+                f"📢 <b>KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN</b>\n\n"
+                f"Đơn hàng: <b>#{order_id}</b>\n"
+                f"Khách: <a href='tg://user?id={user.id}'>{user.full_name}</a>\n"
+                f"ID: <code>{user.id}</code>\n"
+                f"Sản phẩm: {order['products']['name']}\n"
+                f"Số tiền: {order['products']['price']:,}đ\n\n"
+                f"Vui lòng kiểm tra tài khoản và duyệt đơn."
+            )
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"✅ Duyệt đơn #{order_id}", callback_data=f"approve_{order_id}")]]
+            )
+            await context.bot.send_message(ADMIN_ID, text, reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Lỗi thông báo xác nhận: {e}")
+
+        await query.message.edit_caption(
+            caption=query.message.caption + "\n\n✅ Bạn đã xác nhận đã chuyển khoản. Vui lòng chờ admin duyệt.",
+            reply_markup=None,
+        )
+        await query.answer("Đã gửi xác nhận cho admin!")
+
+    elif data == "my_orders":
+        res = (
+            supabase.table("orders")
+            .select("id, status, products(name)")
+            .eq("user_id", user.id)
+            .order("id", desc=True)
+            .limit(10)
+            .execute()
+        )
+        orders = res.data or []
+
+        if not orders:
+            await query.message.edit_text("Bạn chưa có đơn hàng nào.")
+            return
+
+        text = "📦 <b>Đơn hàng của bạn:</b>\n\n"
+        status_map = {
+            "pending": "⏳ Chờ thanh toán",
+            "completed": "🎉 Hoàn thành",
+            "cancelled": "❌ Đã hủy",
+        }
+        for o in orders:
+            p_name = o["products"]["name"] if o.get("products") else "N/A"
+            text += f"#{o['id']} | {p_name}\n{status_map.get(o['status'], o['status'])}\n" + "─" * 20 + "\n"
+
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")]])
+        await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+    elif data == "back_main":
+        await cmd_start(update, context)
+
+    # ==================== ADMIN CALLS ====================
+    elif data == "admin_panel":
+        if not is_admin(user.id):
+            await query.answer("Không có quyền!", show_alert=True)
+            return
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📋 Đơn chờ duyệt", callback_data="admin_pending")],
+                [InlineKeyboardButton("⬅️ Quay lại", callback_data="back_main")],
+            ]
+        )
+        await query.message.edit_text("⚙️ <b>Admin Panel</b>", reply_markup=kb, parse_mode="HTML")
 
     elif data == "admin_pending":
-        orders = load_json(ORDERS_FILE, {})
-        pending = [(oid, o) for oid, o in orders.items() if o["status"] == "waiting_admin"]
-        if not pending:
-            await query.edit_message_text("✅ Không có đơn nào đang chờ duyệt.")
+        if not is_admin(user.id):
             return
-        text = "<b>🕐 ĐƠN ĐANG CHỜ DUYỆT</b>\n\n"
-        keyboard = []
-        for oid, o in pending[:10]:
-            text += f"• <code>{oid}</code> | {o['product_name']} | {o['amount']:,}đ\n  {o['full_name']}\n\n"
-            keyboard.append([
-                InlineKeyboardButton(f"✅ {oid[-6:]}", callback_data=f"approve_{oid}"),
-                InlineKeyboardButton(f"❌ {oid[-6:]}", callback_data=f"reject_{oid}")
-            ])
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+        res = (
+            supabase.table("orders")
+            .select("id, user_id, products(name, price)")
+            .eq("status", "pending")
+            .execute()
+        )
+        orders = res.data or []
 
-    elif data == "admin_broadcast_info":
-        await query.edit_message_text(
-            "📢 <b>Broadcast</b>\n\nGửi lệnh:\n<code>/broadcast Nội dung thông báo của bạn</code>",
-            parse_mode=ParseMode.HTML
+        if not orders:
+            await query.message.edit_text(
+                "Không có đơn chờ duyệt.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Quay lại", callback_data="admin_panel")]]
+                ),
+            )
+            return
+
+        text = "📋 <b>Đơn chờ duyệt:</b>\n\n"
+        buttons = []
+        for o in orders:
+            oid = o["id"]
+            uid = o["user_id"]
+            p_name = o["products"]["name"]
+            p_price = o["products"]["price"]
+            text += f"#{oid} | {p_name} | {p_price:,}đ\nUser: {uid}\n" + "─" * 20 + "\n"
+            buttons.append([InlineKeyboardButton(f"✅ Duyệt #{oid}", callback_data=f"approve_{oid}")])
+
+        buttons.append([InlineKeyboardButton("⬅️ Quay lại", callback_data="admin_panel")])
+        await query.message.edit_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
         )
 
-    elif data == "admin_addkey_info":
-        await query.edit_message_text(
-            "➕ <b>Thêm Key</b>\n\n"
-            "Cú pháp:\n<code>/addkey product_id key1 key2 key3...</code>\n\n"
-            "Ví dụ:\n<code>/addkey key_1m KEY-ABC-123 KEY-DEF-456</code>\n\n"
-            "Product ID hiện có:\n" + "\n".join([f"• <code>{k}</code>" for k in PRODUCTS.keys()]),
-            parse_mode=ParseMode.HTML
+    elif data.startswith("approve_"):
+        if not is_admin(user.id):
+            return
+        order_id = int(data.split("_")[1])
+
+        # Lấy thông tin đơn hàng
+        o_res = supabase.table("orders").select("*, products(name)").eq("id", order_id).eq("status", "pending").execute()
+        if not o_res.data:
+            await query.answer("Đơn không tồn tại hoặc đã xử lý", show_alert=True)
+            return
+
+        order = o_res.data[0]
+        product_id = order["product_id"]
+        customer_id = order["user_id"]
+        product_name = order["products"]["name"]
+
+        # Tìm 1 key chưa sử dụng
+        k_res = (
+            supabase.table("keys")
+            .select("*")
+            .eq("product_id", product_id)
+            .eq("is_sold", False)
+            .limit(1)
+            .execute()
         )
+        if not k_res.data:
+            await query.answer("Hết key trong kho!", show_alert=True)
+            return
 
-    elif data == "admin_all_orders":
-        orders = load_json(ORDERS_FILE, {})
-        text = "<b>📋 10 ĐƠN GẦN NHẤT</b>\n\n"
-        for oid, o in sorted(orders.items(), key=lambda x: x[1]["created_at"], reverse=True)[:10]:
-            text += f"• <code>{oid}</code> | {o['status']} | {o['amount']:,}đ\n"
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML)
+        key_info = k_res.data[0]
+        key_id = key_info["id"]
+        key_code = key_info["key_code"]
 
-async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID:
-        return
-    order_id = query.data.replace("approve_", "")
-    orders = load_json(ORDERS_FILE, {})
-    if order_id not in orders or orders[order_id]["status"] != "waiting_admin":
-        await query.answer("Đơn không hợp lệ hoặc đã xử lý.", show_alert=True)
-        return
-    order = orders[order_id]
-    pid = order["product_id"]
-    if not PRODUCTS[pid]["stock"]:
-        await query.edit_message_text("❌ Hết key. Không thể duyệt.")
-        return
-    key = PRODUCTS[pid]["stock"].pop(0)
-    order["status"] = "completed"
-    order["key"] = key
-    order["approved_at"] = datetime.now().isoformat()
-    save_json(ORDERS_FILE, orders)
-    try:
-        await context.bot.send_message(
-            order["user_id"],
-            f"🎉 <b>Đơn hàng {order_id} đã được duyệt!</b>\n\n"
-            f"Sản phẩm: <b>{order['product_name']}</b>\n"
-            f"🔑 Key của bạn:\n<code>{key}</code>\n\nCảm ơn bạn đã mua hàng!",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception as e:
-        logger.error(e)
-    await query.edit_message_text(
-        f"✅ Đã duyệt <code>{order_id}</code>\nKey: <code>{key}</code>\nĐã gửi cho khách.",
-        parse_mode=ParseMode.HTML
-    )
+        # Cập nhật DB
+        supabase.table("keys").update({"is_sold": True}).eq("id", key_id).execute()
+        supabase.table("orders").update({"status": "completed"}).eq("id", order_id).execute()
 
-async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.from_user.id != ADMIN_ID:
-        return
-    order_id = query.data.replace("reject_", "")
-    orders = load_json(ORDERS_FILE, {})
-    if order_id not in orders:
-        return
-    order = orders[order_id]
-    order["status"] = "rejected"
-    order["rejected_at"] = datetime.now().isoformat()
-    save_json(ORDERS_FILE, orders)
-    try:
-        await context.bot.send_message(
-            order["user_id"],
-            f"❌ Đơn hàng <code>{order_id}</code> đã bị từ chối.\n"
-            f"Lý do: Không tìm thấy giao dịch / sai nội dung.\n"
-            f"Vui lòng liên hệ Admin nếu bạn đã chuyển khoản.",
-            parse_mode=ParseMode.HTML
-        )
-    except Exception:
-        pass
-    await query.edit_message_text(f"❌ Đã từ chối đơn <code>{order_id}</code>.", parse_mode=ParseMode.HTML)
-
-# ==================== ADMIN COMMANDS ====================
-async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /broadcast <nội dung>")
-        return
-    message = " ".join(context.args)
-    users = load_json(USERS_FILE, {})
-    success = fail = 0
-    for uid in users:
         try:
-            await context.bot.send_message(int(uid), f"📢 <b>Thông báo từ Admin</b>\n\n{message}", parse_mode=ParseMode.HTML)
-            success += 1
-        except Exception:
-            fail += 1
-    await update.message.reply_text(f"✅ Gửi xong\nThành công: {success}\nThất bại: {fail}")
+            await context.bot.send_message(
+                customer_id,
+                f"🎉 <b>Đơn hàng #{order_id} đã được duyệt!</b>\n\n"
+                f"Sản phẩm: {product_name}\n"
+                f"Key của bạn:\n<code>{key_code}</code>",
+                parse_mode="HTML",
+            )
+            await query.answer("Đã gửi key thành công!")
+        except Exception as e:
+            await query.answer(f"Lỗi gửi tin nhắn: {e}", show_alert=True)
 
-async def admin_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Cú pháp: /addkey <product_id> <key1> <key2> ...")
-        return
-    pid = context.args[0]
-    if pid not in PRODUCTS:
-        await update.message.reply_text("❌ Product ID không tồn tại.")
-        return
-    keys = context.args[1:]
-    PRODUCTS[pid]["stock"].extend(keys)
-    await update.message.reply_text(
-        f"✅ Đã thêm {len(keys)} key vào <b>{PRODUCTS[pid]['name']}</b>\nTồn kho hiện tại: {len(PRODUCTS[pid]['stock'])}",
-        parse_mode=ParseMode.HTML
-    )
 
-async def admin_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    orders = load_json(ORDERS_FILE, {})
-    users = load_json(USERS_FILE, {})
-    completed = [o for o in orders.values() if o["status"] == "completed"]
-    revenue = sum(o["amount"] for o in completed)
-    text = (
-        f"<b>📊 THỐNG KÊ</b>\n\n"
-        f"👥 User: {len(users)}\n"
-        f"📦 Đơn: {len(orders)}\n"
-        f"✅ Hoàn thành: {len(completed)}\n"
-        f"💰 Doanh thu: {revenue:,} VNĐ"
-    )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+# ==================== ĐĂNG KÝ HANDLERS ====================
+telegram_app.add_handler(CommandHandler("start", cmd_start))
+telegram_app.add_handler(CallbackQueryHandler(handle_callback))
 
-# ==================== QUẢN LÝ SẢN PHẨM ====================
-async def admin_listprod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    text = "<b>📦 DANH SÁCH SẢN PHẨM</b>\n\n"
-    for pid, p in PRODUCTS.items():
-        text += (
-            f"• <b>ID:</b> <code>{pid}</code>\n"
-            f"  Tên: {p['name']}\n"
-            f"  Giá: <code>{p['price']:,}đ</code>\n"
-            f"  Tồn kho: {len(p['stock'])} key\n"
-            f"  Mô tả: {p['description']}\n\n"
-        )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
-async def admin_setprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) != 2:
-        await update.message.reply_text("Cú pháp: /setprice <product_id> <giá mới>\nVí dụ: /setprice key_1m 89000")
-        return
-    pid = context.args[0]
-    if pid not in PRODUCTS:
-        await update.message.reply_text("❌ Product ID không tồn tại.")
-        return
-    try:
-        new_price = int(context.args[1])
-        if new_price <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("❌ Giá phải là số nguyên dương.")
-        return
-    old_price = PRODUCTS[pid]["price"]
-    PRODUCTS[pid]["price"] = new_price
-    await update.message.reply_text(
-        f"✅ Đã đổi giá <b>{PRODUCTS[pid]['name']}</b>\nTừ <code>{old_price:,}đ</code> → <code>{new_price:,}đ</code>",
-        parse_mode=ParseMode.HTML
-    )
+# ==================== FASTAPI WEBHOOK CONFIG ====================
+@app.on_event("startup")
+async def startup_event():
+    await telegram_app.initialize()
+    logger.info("Telegram Bot Application đã khởi tạo thành công.")
 
-async def admin_editprod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) < 3:
-        await update.message.reply_text(
-            "Cú pháp: /editprod <product_id> <field> <giá trị mới>\n\n"
-            "Field hỗ trợ:\n• name\n• description\n• price\n\n"
-            "Ví dụ:\n<code>/editprod key_1m name Premium Key 30 Ngày</code>\n"
-            "<code>/editprod key_1m price 79000</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-    pid = context.args[0]
-    field = context.args[1].lower()
-    value = " ".join(context.args[2:])
-    if pid not in PRODUCTS:
-        await update.message.reply_text("❌ Product ID không tồn tại.")
-        return
-    if field == "name":
-        PRODUCTS[pid]["name"] = value
-        await update.message.reply_text(f"✅ Đã đổi tên thành: <b>{value}</b>", parse_mode=ParseMode.HTML)
-    elif field == "description":
-        PRODUCTS[pid]["description"] = value
-        await update.message.reply_text(f"✅ Đã đổi mô tả thành: {value}")
-    elif field == "price":
-        try:
-            new_price = int(value)
-            PRODUCTS[pid]["price"] = new_price
-            await update.message.reply_text(f"✅ Đã đổi giá thành: <code>{new_price:,}đ</code>", parse_mode=ParseMode.HTML)
-        except ValueError:
-            await update.message.reply_text("❌ Giá phải là số.")
-    else:
-        await update.message.reply_text("❌ Field không hợp lệ. Chỉ hỗ trợ: name, description, price")
 
-async def admin_addprod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) < 3:
-        await update.message.reply_text("Cú pháp: /addprod <product_id> <giá> <tên sản phẩm>\nVí dụ: /addprod key_6m 399000 Premium Key 6 Tháng")
-        return
-    pid = context.args[0]
-    if pid in PRODUCTS:
-        await update.message.reply_text("❌ Product ID này đã tồn tại.")
-        return
-    try:
-        price = int(context.args[1])
-    except ValueError:
-        await update.message.reply_text("❌ Giá phải là số.")
-        return
-    name = " ".join(context.args[2:])
-    PRODUCTS[pid] = {
-        "name": name,
-        "price": price,
-        "description": name,
-        "stock": []
-    }
-    await update.message.reply_text(
-        f"✅ Đã thêm sản phẩm mới:\n• ID: <code>{pid}</code>\n• Tên: <b>{name}</b>\n• Giá: <code>{price:,}đ</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-async def admin_delprod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if not context.args:
-        await update.message.reply_text("Cú pháp: /delprod <product_id>")
-        return
-    pid = context.args[0]
-    if pid not in PRODUCTS:
-        await update.message.reply_text("❌ Product ID không tồn tại.")
-        return
-    name = PRODUCTS[pid]["name"]
-    del PRODUCTS[pid]
-    await update.message.reply_text(f"✅ Đã xóa sản phẩm <b>{name}</b> (ID: <code>{pid}</code>)", parse_mode=ParseMode.HTML)
-
-async def admin_renameprod(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if len(context.args) != 2:
-        await update.message.reply_text("Cú pháp: /renameprod <old_id> <new_id>\nVí dụ: /renameprod key_1m key_30d")
-        return
-    old_id = context.args[0]
-    new_id = context.args[1]
-    if old_id not in PRODUCTS:
-        await update.message.reply_text("❌ Product ID cũ không tồn tại.")
-        return
-    if new_id in PRODUCTS:
-        await update.message.reply_text("❌ Product ID mới đã tồn tại.")
-        return
-    PRODUCTS[new_id] = PRODUCTS.pop(old_id)
-    await update.message.reply_text(f"✅ Đã đổi Product ID:\n<code>{old_id}</code> → <code>{new_id}</code>", parse_mode=ParseMode.HTML)
-
-# ==================== MAIN ====================
-async def main():
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # User
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Regex("^🛒 Mua Key$"), show_products))
-    application.add_handler(MessageHandler(filters.Regex("^📋 Đơn hàng của tôi$"), my_orders))
-    application.add_handler(MessageHandler(filters.Regex("^ℹ️ Hướng dẫn$"), guide))
-    application.add_handler(MessageHandler(filters.Regex("^📞 Liên hệ Admin$"), contact_admin))
-    application.add_handler(MessageHandler(filters.Regex("^🛠 Admin Panel$"), admin_panel))
-
-    # Callbacks
-    application.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
-    application.add_handler(CallbackQueryHandler(paid_callback, pattern="^paid_"))
-    application.add_handler(CallbackQueryHandler(cancel_order, pattern="^cancel_"))
-    application.add_handler(CallbackQueryHandler(admin_approve, pattern="^approve_"))
-    application.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
-    application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
-
-    # Admin commands
-    application.add_handler(CommandHandler("broadcast", admin_broadcast))
-    application.add_handler(CommandHandler("addkey", admin_addkey))
-    application.add_handler(CommandHandler("stats", admin_stats_cmd))
-    application.add_handler(CommandHandler("listprod", admin_listprod))
-    application.add_handler(CommandHandler("setprice", admin_setprice))
-    application.add_handler(CommandHandler("editprod", admin_editprod))
-    application.add_handler(CommandHandler("addprod", admin_addprod))
-    application.add_handler(CommandHandler("delprod", admin_delprod))
-    application.add_handler(CommandHandler("renameprod", admin_renameprod))
-
-    print("✅ Bot đang chạy...")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+@app.post("/")
+async def webhook(request: Request):
+    json_data = await request.json()
+    update = Update.de_json(json_data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"status": "ok"}
