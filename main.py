@@ -2,10 +2,8 @@ import os
 import html
 import logging
 from io import BytesIO
-import threading
 
 import qrcode
-import uvicorn
 
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
@@ -32,7 +30,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]  # dùng service_role key (giữ bí m
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
-ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
+ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0352836546")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
 BANK_BIN = os.environ.get("BANK_BIN", "970422")
 
@@ -638,18 +636,29 @@ telegram_app.add_handler(CommandHandler("broadcast", cmd_broadcast))
 telegram_app.add_handler(CallbackQueryHandler(handle_callback))
 
 
-# ==================== FASTAPI & MAIN ====================
+# ==================== FASTAPI & TELEGRAM STARTUP ====================
+@app.on_event("startup")
+async def startup_event():
+    try:
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.updater.start_polling()
+        logger.info("✅ Telegram Bot đã khởi động chạy Polling thành công!")
+    except Exception as e:
+        logger.error(f"❌ Lỗi khởi động bot: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        logger.info("🛑 Đã tắt Bot và Web server.")
+    except Exception as e:
+        logger.error(f"Lỗi khi tắt: {e}")
+
+
 @app.get("/")
 def health():
     return {"status": "running"}
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-if __name__ == "__main__":
-    # Chạy Web Server ở luồng riêng để đáp ứng yêu cầu port binding của Render
-    threading.Thread(target=run_web, daemon=True).start()
-    
-    # Chạy Bot Telegram dạng Polling ở luồng chính
-    telegram_app.run_polling()
