@@ -5,7 +5,7 @@ import urllib.request
 from urllib.parse import quote
 import qrcode
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,7 +29,8 @@ try:
 except Exception:
     ADMIN_ID = 0
 
-BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
+# ⚠️ Quan trọng: BANK_NAME phải là mã viết tắt chuẩn của VietQR (Ví dụ: MB, VCB, TCB, ACB...)
+BANK_NAME = os.environ.get("BANK_NAME", "MB")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://telegram-bot-key-qzt7.onrender.com/webhook")
@@ -69,13 +70,13 @@ async def add_product_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         args = context.args
         if len(args) < 3:
-            await update.message.reply_text("⚠️ Sai cú pháp!\nDùng chuẩn: `/addproduct <id_số> <giá> <tên sản phẩm>`\nVí dụ: `/addproduct 1 15000 Acc 19-23ucl`", parse_mode="Markdown")
+            await update.message.reply_text("⚠️ Sai cú pháp!\nDùng chuẩn: `/addproduct <id_số> <giá> <tên sản phẩm>`", parse_mode="Markdown")
             return
         
         try:
             prod_id = int(args[0])
         except ValueError:
-            await update.message.reply_text("❌ **ID sản phẩm phải là một con số** (ví dụ: `1`, `2`, `3`...), không phải chữ!", parse_mode="Markdown")
+            await update.message.reply_text("❌ **ID sản phẩm phải là một con số** (ví dụ: `1`, `2`, `3`...)", parse_mode="Markdown")
             return
 
         price = int(args[1])
@@ -101,7 +102,7 @@ async def add_key_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         args = context.args
         if len(args) < 2:
-            await update.message.reply_text("⚠️ Sai cú pháp!\nDùng chuẩn: `/addkey <product_id> <key_code>`\nVí dụ: `/addkey 1 ABCD-1234-XYZ`", parse_mode="Markdown")
+            await update.message.reply_text("⚠️ Sai cú pháp!\nDùng chuẩn: `/addkey <product_id> <key_code>`", parse_mode="Markdown")
             return
         
         try:
@@ -168,7 +169,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             order_id = order_res.data[0]["id"]
             
-            # Tạo QR code an toàn với mã hóa URL
+            # Tạo URL VietQR chuẩn xác
             encoded_acc_name = quote(ACCOUNT_NAME)
             content = f"DH{order_id}"
             qr_url = f"https://img.vietqr.io/image/{BANK_NAME}-{ACCOUNT_NUMBER}-compact2.png?amount={product['price']}&addInfo={content}&accountName={encoded_acc_name}"
@@ -178,7 +179,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 req = urllib.request.Request(qr_url, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, timeout=5) as response:
                     qr_bytes = response.read()
-            except Exception:
+            except Exception as e:
+                logger.warning(f"⚠️ Không tải được ảnh từ VietQR, đang tạo QR dự phòng: {e}")
                 pass
                 
             if not qr_bytes:
@@ -207,14 +209,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("❌ Hủy đơn", callback_data="view_products")]
             ])
             
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-                
+            # Gửi ảnh QR trực tiếp một cách an toàn
             await context.bot.send_photo(
                 chat_id=query.message.chat_id,
-                photo=InputFile(BytesIO(qr_bytes), filename=f"qr_dh{order_id}.png"),
+                photo=BytesIO(qr_bytes),
                 caption=caption,
                 reply_markup=kb,
                 parse_mode="Markdown"
