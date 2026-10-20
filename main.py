@@ -3,8 +3,7 @@ import logging
 from io import BytesIO
 import qrcode
 from fastapi import FastAPI, Request
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
-from telegram.ext import (
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
     Application,
     CommandHandler,
     CallbackQueryHandler,
@@ -205,11 +204,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         )
 
-        await query.message.reply_photo(
-            photo=BufferedInputFile(qr_image.read(), filename=f"qr_dh{order_id}.png"),
-            caption=caption,
-            reply_markup=kb,
-            parse_mode="HTML",
+     await query.message.reply_photo(
+    photo=InputFile(qr_image, filename=f"qr_dh{order_id}.png"),
+    caption=caption,
+    reply_markup=kb,
+    parse_mode="HTML",
+)
         )
         await query.answer()
 
