@@ -210,7 +210,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
            reply_markup=kb,
            parse_mode="HTML",
                              )
-        )
         await query.answer()
 
     elif data.startswith("confirm_paid_"):
