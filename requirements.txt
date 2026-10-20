@@ -1,4 +1,5 @@
 fastapi
 uvicorn
-requests
+python-telegram-bot
 supabase
+qrcode
