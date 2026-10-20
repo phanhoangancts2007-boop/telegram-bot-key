@@ -1,7 +1,9 @@
 import os
 import html
 import logging
-from urllib.parse import quote
+from io import BytesIO
+
+import qrcode
 
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
@@ -19,6 +21,7 @@ from supabase import create_client, Client
 # ==================== LOGGING ====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # tránh in token bot vào log
 
 # ==================== BIẾN MÔI TRƯỜNG ====================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -48,11 +51,39 @@ def esc(s) -> str:
     return html.escape(str(s or ""))
 
 
-def vietqr_url(amount: int, content: str) -> str:
-    return (
-        f"https://img.vietqr.io/image/{BANK_BIN}-{ACCOUNT_NUMBER}-compact2.png"
-        f"?amount={amount}&addInfo={quote(content)}&accountName={quote(ACCOUNT_NAME)}"
+def _tlv(tag: str, value: str) -> str:
+    return f"{tag}{len(value):02d}{value}"
+
+
+def _crc16(data: str) -> str:
+    crc = 0xFFFF
+    for b in data.encode():
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else (crc << 1)
+            crc &= 0xFFFF
+    return f"{crc:04X}"
+
+
+def vietqr_payload(amount: int, content: str) -> str:
+    """Chuỗi VietQR (NAPAS 247) chuẩn, có CRC."""
+    bank = _tlv("00", BANK_BIN) + _tlv("01", ACCOUNT_NUMBER)
+    merchant = _tlv("00", "A000000727") + _tlv("01", bank) + _tlv("02", "QRIBFTTA")
+    p = (
+        _tlv("00", "01") + _tlv("01", "12") + _tlv("38", merchant)
+        + _tlv("53", "704") + _tlv("54", str(amount)) + _tlv("58", "VN")
+        + _tlv("62", _tlv("08", content)) + "6304"
     )
+    return p + _crc16(p)
+
+
+def make_qr_png(amount: int, content: str) -> BytesIO:
+    img = qrcode.make(vietqr_payload(amount, content), border=2, box_size=8)
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    bio.name = "qr.png"
+    return bio
 
 
 def stock_of(product_id: str) -> int:
@@ -264,10 +295,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             await query.message.reply_photo(
-                photo=vietqr_url(price, content), caption=caption, reply_markup=kb, parse_mode="HTML"
+                photo=make_qr_png(price, content), caption=caption, reply_markup=kb, parse_mode="HTML"
             )
         except Exception as e:  # QR lỗi thì vẫn gửi thông tin chuyển khoản dạng chữ
-            logger.error(f"Lỗi gửi QR: {e}")
+            logger.exception("Lỗi gửi QR")
             await query.message.reply_text(caption, reply_markup=kb, parse_mode="HTML")
         await query.answer()
 
