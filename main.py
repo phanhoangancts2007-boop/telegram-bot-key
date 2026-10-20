@@ -19,10 +19,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== LẤY BIẾN MÔI TRƯỜNG ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))  # ID Telegram của Admin
+BOT_TOKEN = os.environ.get("8958149815:AAElJ97BtD3IOWiXMH0iyzm0SJQczOPWkzg")
+SUPABASE_URL = os.environ.get("https://tgbefrxbptislbytthsb.supabase.co")
+SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnYmVmcnhicHRpc2xieXR0aHNiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI0NTY4NjgsImV4cCI6MjEwODAzMjg2OH0.STzF-a-7N2i8twTOG2d5ypl-zyqFlaS9GjkQf2n_zo4")
+ADMIN_ID = int(os.environ.get("8428411178", "0"))  # ID Telegram của Admin
 
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
@@ -371,6 +371,60 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Đã gửi key thành công!")
         except Exception as e:
             await query.answer(f"Lỗi gửi tin nhắn: {e}", show_alert=True)
+            # ==================== LỆNH THÊM SẢN PHẨM & KEY DÀNH CHO ADMIN ====================
+async def cmd_addproduct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        return
+
+    # Cú pháp: /addproduct <id> <price> <name>
+    if len(context.args) < 3:
+        await update.message.reply_text("❌ Cú pháp: `/addproduct <id> <price> <name>`\nVí dụ: `/addproduct 1 50000 Key Windows 11`", parse_mode="Markdown")
+        return
+
+    try:
+        pid = int(context.args[0])
+        price = int(context.args[1])
+        name = " ".join(context.args[2:])
+
+        supabase.table("products").insert({
+            "id": pid,
+            "name": name,
+            "price": price,
+            "description": name
+        }).execute()
+
+        await update.message.reply_text(f"✅ Đã thêm sản phẩm:\n<b>ID:</b> {pid}\n<b>Tên:</b> {name}\n<b>Giá:</b> {price:,}đ", parse_mode="HTML")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Lỗi: {e}")
+
+async def cmd_addkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        return
+
+    # Cú pháp: /addkey <product_id> <key_code>
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Cú pháp: `/addkey <product_id> <key_code>`\nVí dụ: `/addkey 1 XXXX-YYYY-ZZZZ`", parse_mode="Markdown")
+        return
+
+    try:
+        product_id = int(context.args[0])
+        key_code = context.args[1]
+
+        supabase.table("keys").insert({
+            "product_id": product_id,
+            "key_code": key_code,
+            "is_sold": False
+        }).execute()
+
+        await update.message.reply_text(f"✅ Đã thêm 1 key cho sản phẩm ID `{product_id}`!", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Lỗi: {e}")
+
+# Đăng ký handler lệnh Admin
+telegram_app.add_handler(CommandHandler("addproduct", cmd_addproduct))
+telegram_app.add_handler(CommandHandler("addkey", cmd_addkey))
 
 
 # ==================== ĐĂNG KÝ HANDLERS ====================
