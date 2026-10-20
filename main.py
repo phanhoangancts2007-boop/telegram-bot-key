@@ -77,6 +77,22 @@ def get_available_keys_count(product_id: int) -> int:
         .execute()
     )
     return res.count if res.count is not None else 0
+    # ==================== CẤU HÌNH WEBHOOK TỰ ĐỘNG ====================
+WEBHOOK_URL = "https://telegram-bot-key-qzt7.onrender.com/webhook"  # Thay bằng URL Web Service trên Render của bạn
+
+@app.on_event("startup")
+on_startup():
+    # Đăng ký webhook với Telegram khi khởi động app
+    await telegram_app.bot.set_webhook(url=WEBHOOK_URL)
+    await telegram_app.initialize()
+    logger.info(f"✅ Đã thiết lập Webhook thành công: {WEBHOOK_URL}")
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"status": "ok"}
 
 
 # ==================== CÁC XỬ LÝ DÀNH CHO USER ====================
