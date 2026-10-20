@@ -18,12 +18,21 @@ from supabase import create_client, Client
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== LẤY BIẾN MÔI TRƯỜNG ====================
+# ==================== LẤY BIẾN MÔI TRƯỜNG AN TOÀN ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
+# Xử lý ADMIN_ID chống lỗi khoảng trắng hoặc giá trị rỗng làm sập ứng dụng
+try:
+    admin_env = os.environ.get("ADMIN_ID", "0")
+    ADMIN_ID = int(str(admin_env).strip()) if admin_env else 0
+except Exception:
+    ADMIN_ID = 0  # Giá trị dự phòng nếu lỗi
+
+# Kiểm tra nhanh để không bị lỗi ngầm
+if not BOT_TOKEN or not SUPABASE_URL or not SUPABASE_KEY:
+    logger.error("⚠️ CẢNH BÁO: Thiếu biến môi trường quan trọng (BOT_TOKEN, SUPABASE_URL hoặc SUPABASE_KEY)!")
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
