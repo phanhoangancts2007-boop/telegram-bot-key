@@ -19,10 +19,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== LẤY BIẾN MÔI TRƯỜNG ====================
-BOT_TOKEN = os.environ.get("8958149815:AAElJ97BtD3IOWiXMH0iyzm0SJQczOPWkzg")
-SUPABASE_URL = os.environ.get("https://tgbefrxbptislbytthsb.supabase.co")
-SUPABASE_KEY = os.environ.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRnYmVmcnhicHRpc2xieXR0aHNiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI0NTY4NjgsImV4cCI6MjEwODAzMjg2OH0.STzF-a-7N2i8twTOG2d5ypl-zyqFlaS9GjkQf2n_zo4")
-ADMIN_ID = int(os.environ.get("8428411178", "0"))  # ID Telegram của Admin
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0394569153")
