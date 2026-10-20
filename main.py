@@ -664,3 +664,11 @@ async def webhook(request: Request):
     update = Update.de_json(await request.json(), telegram_app.bot)
     await telegram_app.process_update(update)
     return {"status": "ok"}
+    if __name__ == "__main__":
+    # Khởi tạo application với token từ biến môi trường
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # --- (Các handler / lệnh của bot giữ nguyên ở đây) ---
+    
+    # Chạy chế độ Polling (Bot tự động đi kéo tin nhắn về)
+    application.run_polling()
