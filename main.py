@@ -132,7 +132,7 @@ def products_view():
         text += "\n"
         if stock > 0:
             buttons.append(
-                [InlineKeyboardButton(f"Mua {p['name']} - {p['price']:,}đ", callback_data=f"buy:{p['id']}")]
+                [InlineKeyboardButton(f"Mua {p['name']} - {p['price']:,}đ", callback_data=f"select_qty:{p['id']}:1")]
             )
     if not buttons:
         text += "⚠️ Hiện tại tất cả sản phẩm đều hết hàng."
@@ -162,8 +162,9 @@ def addkey_help_text() -> str:
 
 
 def orders_view(user_id: int) -> str:
+    # Lấy thêm cột quantity, nếu đơn cũ không có thì fallback về 1
     orders = (
-        supabase.table("orders").select("id, status, products(name)")
+        supabase.table("orders").select("id, status, quantity, products(name)")
         .eq("user_id", user_id).order("id", desc=True).limit(10).execute().data or []
     )
     if not orders:
@@ -172,7 +173,8 @@ def orders_view(user_id: int) -> str:
     text = "📦 <b>Đơn hàng của bạn:</b>\n\n"
     for o in orders:
         p_name = (o.get("products") or {}).get("name", "N/A")
-        text += f"#{o['id']} | {esc(p_name)}\n{status_map.get(o['status'], o['status'])}\n\n"
+        qty = o.get("quantity", 1)
+        text += f"#{o['id']} | {esc(p_name)} (SL: {qty})\n{status_map.get(o['status'], o['status'])}\n\n"
     return text
 
 
@@ -236,23 +238,80 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, text, kb)
         await query.answer()
 
-    # ---------- Mua ----------
-    elif data.startswith("buy:"):
-        product_id = data.split(":", 1)[1]
+    # ---------- Chọn số lượng trước khi mua (select_qty:product_id:quantity) ----------
+    elif data.startswith("select_qty:"):
+        parts = data.split(":")
+        product_id = parts[1]
+        current_qty = int(parts[2])
+
         res = supabase.table("products").select("*").eq("id", product_id).execute()
         if not res.data:
             await query.answer("Sản phẩm không tồn tại!", show_alert=True)
             return
-        if stock_of(product_id) <= 0:
+        
+        max_stock = stock_of(product_id)
+        if max_stock <= 0:
             await query.answer("Sản phẩm đã hết hàng!", show_alert=True)
             return
 
         product = res.data[0]
         name, price = product["name"], product["price"]
 
+        # Các mức số lượng nhanh để khách bấm cho lẹ (1, 3, 5, 10 hoặc giới hạn theo tồn kho)
+        qty_options = [1, 2, 3, 5, 10]
+        row_btns = []
+        for q in qty_options:
+            if q <= max_stock:
+                text_btn = f"✅ {q}" if q == current_qty else str(q)
+                row_btns.append(InlineKeyboardButton(text_btn, callback_data=f"select_qty:{product_id}:{q}"))
+
+        kb_rows = [row_btns] if row_btns else []
+        
+        # Nút xác nhận mua với số lượng hiện tại
+        total_price = price * current_qty
+        kb_rows.append([InlineKeyboardButton(f"🛒 Xác nhận mua {current_qty} cái ({total_price:,}đ)", callback_data=f"buy:{product_id}:{current_qty}")])
+        kb_rows.append([InlineKeyboardButton("⬅️ Quay lại danh sách", callback_data="show_products")])
+
+        text = (
+            f"🛒 <b>Chọn số lượng mua</b>\n\n"
+            f"Sản phẩm: <b>{esc(name)}</b>\n"
+            f"Đơn giá: <code>{price:,}đ</code>\n"
+            f"Tồn kho: <b>{max_stock}</b>\n\n"
+            f"👉 Số lượng chọn: <b>{current_qty}</b>\n"
+            f"💰 Tổng tiền: <b>{total_price:,}đ</b>"
+        )
+        await safe_edit(query, text, InlineKeyboardMarkup(kb_rows))
+        await query.answer()
+
+    # ---------- Tạo đơn hàng (buy:product_id:quantity) ----------
+    elif data.startswith("buy:"):
+        parts = data.split(":")
+        product_id = parts[1]
+        quantity = int(parts[2]) if len(parts) > 2 else 1
+
+        res = supabase.table("products").select("*").eq("id", product_id).execute()
+        if not res.data:
+            await query.answer("Sản phẩm không tồn tại!", show_alert=True)
+            return
+        
+        max_stock = stock_of(product_id)
+        if max_stock < quantity:
+            await query.answer(f"Kho chỉ còn {max_stock} sản phẩm không đủ số lượng bạn chọn!", show_alert=True)
+            return
+
+        product = res.data[0]
+        name, unit_price = product["name"], product["price"]
+        total_price = unit_price * quantity
+
+        # Lưu đơn hàng kèm số lượng (quantity)
         order = (
             supabase.table("orders")
-            .insert({"user_id": user.id, "product_id": product_id, "status": "pending"})
+            .insert({
+                "user_id": user.id, 
+                "product_id": product_id, 
+                "quantity": quantity,
+                "status": "pending"
+            })
             .execute()
             .data[0]
         )
@@ -268,7 +327,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ADMIN_ID,
                 f"🔔 <b>ĐƠN HÀNG MỚI #{order_id}</b>\n\n"
                 f"👤 <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a>\n"
-                f"🆔 <code>{user.id}</code>\n🎮 {esc(name)}\n💰 {price:,}đ",
+                f"🆔 <code>{user.id}</code>\n"
+                f"🎮 {esc(name)} (SL: <b>{quantity}</b>)\n"
+                f"💰 Tổng tiền: <b>{total_price:,}đ</b>",
                 reply_markup=admin_kb, parse_mode="HTML",
             )
         except Exception as e:
@@ -276,7 +337,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         caption = (
             f"✅ <b>Đã tạo đơn hàng #{order_id}</b>\n\n"
-            f"Sản phẩm: <b>{esc(name)}</b>\nGiá: <b>{price:,}đ</b>\n\n"
+            f"Sản phẩm: <b>{esc(name)}</b>\n"
+            f"Số lượng: <b>{quantity}</b>\n"
+            f"Tổng tiền: <b>{total_price:,}đ</b>\n\n"
             f"💳 <b>Thông tin chuyển khoản:</b>\n"
             f"Ngân hàng: {esc(BANK_NAME)}\n"
             f"Số tài khoản: <code>{esc(ACCOUNT_NUMBER)}</code>\n"
@@ -292,9 +355,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             await query.message.reply_photo(
-                photo=make_qr_png(price, content), caption=caption, reply_markup=kb, parse_mode="HTML"
+                photo=make_qr_png(total_price, content), caption=caption, reply_markup=kb, parse_mode="HTML"
             )
-        except Exception as e:  # QR lỗi thì vẫn gửi thông tin chuyển khoản dạng chữ
+        except Exception as e:  
             logger.exception("Lỗi gửi QR")
             await query.message.reply_text(caption, reply_markup=kb, parse_mode="HTML")
         await query.answer()
@@ -315,6 +378,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         p = order.get("products") or {}
+        qty = order.get("quantity", 1)
+        total_p = p.get('price', 0) * qty
         try:
             kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton(f"✅ Duyệt đơn #{order_id}", callback_data=f"approve:{order_id}"),
@@ -323,9 +388,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 ADMIN_ID,
                 f"📢 <b>KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN</b>\n\n"
-                f"Đơn: <b>#{order_id}</b>\n"
+                f"Đơn: <b>#{order_id}</b> (SL: {qty})\n"
                 f"Khách: <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a> (<code>{user.id}</code>)\n"
-                f"Sản phẩm: {esc(p.get('name'))}\nSố tiền: {p.get('price', 0):,}đ\n\n"
+                f"Sản phẩm: {esc(p.get('name'))}\nTổng tiền: {total_p:,}đ\n\n"
                 f"Hãy kiểm tra tài khoản rồi duyệt đơn.",
                 reply_markup=kb, parse_mode="HTML",
             )
@@ -378,7 +443,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         orders = (
             supabase.table("orders")
-            .select("id, user_id, products(name, price)")
+            .select("id, user_id, quantity, products(name, price)")
             .eq("status", "pending")
             .order("id")
             .execute()
@@ -394,7 +459,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         for o in orders:
             p = o.get("products") or {}
-            text += f"#{o['id']} | {esc(p.get('name'))} | {p.get('price', 0):,}đ\nUser: <code>{o['user_id']}</code>\n\n"
+            qty = o.get("quantity", 1)
+            total_p = p.get('price', 0) * qty
+            text += f"#{o['id']} | {esc(p.get('name'))} (SL: {qty}) | {total_p:,}đ\nUser: <code>{o['user_id']}</code>\n\n"
             buttons.append(
                 [InlineKeyboardButton(f"✅ Duyệt #{o['id']}", callback_data=f"approve:{o['id']}"),
                  InlineKeyboardButton("❌ Hủy", callback_data=f"reject:{o['id']}")]
@@ -403,6 +470,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, text, InlineKeyboardMarkup(buttons))
         await query.answer()
 
+    # ---------- Admin Duyệt Đơn (Hỗ trợ cấp đủ số lượng key) ----------
     elif data.startswith("approve:"):
         if not is_admin(user.id):
             await query.answer("Không có quyền!", show_alert=True)
@@ -423,36 +491,50 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product_id = order["product_id"]
         customer_id = order["user_id"]
         product_name = (order.get("products") or {}).get("name", "")
+        required_qty = order.get("quantity", 1)
 
-        # Lấy 1 key chưa bán và "khóa" nó (chỉ thành công nếu chưa ai lấy)
-        key_code = None
-        for _ in range(3):
-            k_res = (
-                supabase.table("keys").select("id, key_code")
-                .eq("product_id", product_id).eq("is_sold", False).limit(1).execute()
-            )
-            if not k_res.data:
-                break
-            k = k_res.data[0]
+        # Lấy danh sách key theo số lượng khách mua
+        k_res = (
+            supabase.table("keys")
+            .select("id, key_code")
+            .eq("product_id", product_id)
+            .eq("is_sold", False)
+            .limit(required_qty)
+            .execute()
+        )
+
+        if not k_res.data or len(k_res.data) < required_qty:
+            await query.answer(f"Không đủ key trong kho! (Cần {required_qty}, còn lại {len(k_res.data) if k_res.data else 0})", show_alert=True)
+            return
+
+        acquired_keys = []
+        for k in k_res.data:
             claim = (
                 supabase.table("keys").update({"is_sold": True})
                 .eq("id", k["id"]).eq("is_sold", False).execute()
             )
             if claim.data:
-                key_code = k["key_code"]
-                break
+                acquired_keys.append(k["key_code"])
 
-        if not key_code:
-            await query.answer("Hết key trong kho!", show_alert=True)
+        if len(acquired_keys) < required_qty:
+            await query.answer("Lỗi xung đột kho khi lấy key, vui lòng thử lại!", show_alert=True)
             return
 
-        supabase.table("orders").update({"status": "completed", "key_code": key_code}).eq("id", order_id).execute()
+        # Gộp tất cả key thành chuỗi để lưu và gửi khách
+        all_keys_str = "\n".join(acquired_keys)
+
+        supabase.table("orders").update({
+            "status": "completed", 
+            "key_code": all_keys_str
+        }).eq("id", order_id).execute()
 
         try:
+            keys_display = "\n".join(f"<code>{esc(kc)}</code>" for kc in acquired_keys)
             await context.bot.send_message(
                 customer_id,
                 f"🎉 <b>Đơn hàng #{order_id} đã được duyệt!</b>\n\n"
-                f"Sản phẩm: {esc(product_name)}\nKey của bạn:\n<code>{esc(key_code)}</code>",
+                f"Sản phẩm: {esc(product_name)} (SL: {required_qty})\n"
+                f"Key của bạn:\n{keys_display}",
                 parse_mode="HTML",
             )
             await query.answer("Đã gửi key thành công!")
@@ -461,12 +543,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 ADMIN_ID,
                 f"⚠️ Không gửi được key cho khách <code>{customer_id}</code> (đơn #{order_id}): {esc(e)}\n"
-                f"Key: <code>{esc(key_code)}</code>",
+                f"Keys:\n<code>{esc(all_keys_str)}</code>",
                 parse_mode="HTML",
             )
         try:
             base = query.message.text or query.message.caption or ""
-            await query.message.edit_text(base + f"\n\n✅ Đã duyệt đơn #{order_id}", reply_markup=None)
+            await query.message.edit_text(base + f"\n\n✅ Đã duyệt đơn #{order_id} (SL: {required_qty})", reply_markup=None)
         except Exception:
             pass
 
