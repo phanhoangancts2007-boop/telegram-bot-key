@@ -155,14 +155,14 @@ def addkey_help_text() -> str:
     products = supabase.table("products").select("id").order("sort_order").execute().data or []
     ids = "\n".join(f"• <code>{esc(p['id'])}</code>" for p in products) or "(chưa có sản phẩm)"
     return (
-        "➕ <b>Thêm Key / Tài Khoản</b>\n\n"
-        "Cú pháp:\n<code>/addkey product_id user1|pass1 user2|pass2 ...</code>\n\n"
-        "Ví dụ:\n<code>/addkey acc_lq admin|123456 user2|abcdef</code>\n\n"
+        "➕ <b>Thêm Key</b>\n\nCú pháp:\n<code>/addkey product_id key1 key2 key3...</code>\n\n"
+        "Ví dụ:\n<code>/addkey key_1m KEY-ABC-123 KEY-DEF-456</code>\n\n"
         f"Product ID hiện có:\n{ids}"
     )
 
 
 def orders_view(user_id: int) -> str:
+    # Lấy thêm cột quantity, nếu đơn cũ không có thì fallback về 1
     orders = (
         supabase.table("orders").select("id, status, quantity, products(name)")
         .eq("user_id", user_id).order("id", desc=True).limit(10).execute().data or []
@@ -188,7 +188,7 @@ ADMIN_HELP = (
     "<code>/setdesc id Mô tả mới</code>\n"
     "<code>/delprod id</code>\n\n"
     "<b>Key</b>\n"
-    "<code>/addkey id user|pass user|pass ...</code> (có thể xuống dòng)\n"
+    "<code>/addkey id key1 key2 key3...</code> (có thể xuống dòng)\n"
     "<code>/stock</code> - xem tồn kho\n\n"
     "<b>Khác</b>\n"
     "<code>/broadcast nội dung</code> - gửi cho mọi người dùng"
@@ -531,7 +531,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 customer_id,
                 f"🎉 <b>Đơn hàng #{order_id} đã được duyệt!</b>\n\n"
                 f"Sản phẩm: {esc(product_name)} (SL: {required_qty})\n"
-                f"Thông tin của bạn:\n{keys_display}",
+                f"Key của bạn:\n{keys_display}",
                 parse_mode="HTML",
             )
         except Exception as e:
@@ -542,7 +542,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
 
-        # 2. Gửi thông báo lại cho Admin (Bạn) để nắm tình hình
+        # 2. Gửi thông báo lại cho Admin để nắm tình hình
         try:
             admin_log_msg = (
                 f"✅ <b>BẠN ĐÃ DUYỆT ĐƠN #{order_id}</b>\n\n"
@@ -681,11 +681,9 @@ async def cmd_addkey(update, context):
         await update.message.reply_text("Cú pháp: /addkey id key1 key2 key3...")
         return
     pid, keys = parts[1], list(dict.fromkeys(parts[2:]))  # bỏ key trùng trong cùng lệnh
-    
     if not supabase.table("products").select("id").eq("id", pid).execute().data:
         await update.message.reply_text(f"❌ Không có sản phẩm '{pid}'. Xem /stock để biết ID.")
         return
-        
     supabase.table("keys").insert(
         [{"product_id": pid, "key_code": k, "is_sold": False} for k in keys]
     ).execute()
@@ -715,4 +713,4 @@ async def cmd_broadcast(update, context):
 
 
 # ==================== ĐĂNG KÝ HANDLERS ====================
-telegram_app.add_handler(
+telegram_app.add_handler(CommandHandler
