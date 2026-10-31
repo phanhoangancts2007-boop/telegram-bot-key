@@ -713,4 +713,45 @@ async def cmd_broadcast(update, context):
 
 
 # ==================== ĐĂNG KÝ HANDLERS ====================
-telegram_app.add_handler(CommandHandler
+telegram_app.add_handler(CommandHandler("start", cmd_start))
+telegram_app.add_handler(CommandHandler("help", cmd_help))
+telegram_app.add_handler(CommandHandler("orders", cmd_orders))
+telegram_app.add_handler(MessageHandler(filters.Text([BTN_SHOP]), msg_shop))
+telegram_app.add_handler(MessageHandler(filters.Text([BTN_ADMIN]), msg_admin))
+telegram_app.add_handler(CommandHandler("addprod", cmd_addprod))
+telegram_app.add_handler(CommandHandler("setprice", cmd_setprice))
+telegram_app.add_handler(CommandHandler("setname", cmd_setname))
+telegram_app.add_handler(CommandHandler("setdesc", cmd_setdesc))
+telegram_app.add_handler(CommandHandler("delprod", cmd_delprod))
+telegram_app.add_handler(CommandHandler("addkey", cmd_addkey))
+telegram_app.add_handler(CommandHandler("stock", cmd_stock))
+telegram_app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+telegram_app.add_handler(CallbackQueryHandler(handle_callback))
+
+
+# ==================== FASTAPI & TELEGRAM STARTUP ====================
+@app.on_event("startup")
+async def startup_event():
+    try:
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.updater.start_polling()
+        logger.info("✅ Telegram Bot đã khởi động chạy Polling thành công!")
+    except Exception as e:
+        logger.error(f"❌ Lỗi khởi động bot: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    try:
+        await telegram_app.updater.stop()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        logger.info("🛑 Đã tắt Bot và Web server.")
+    except Exception as e:
+        logger.error(f"Lỗi khi tắt: {e}")
+
+
+@app.get("/")
+def health():
+    return {"status": "ok"}
