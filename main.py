@@ -155,14 +155,14 @@ def addkey_help_text() -> str:
     products = supabase.table("products").select("id").order("sort_order").execute().data or []
     ids = "\n".join(f"• <code>{esc(p['id'])}</code>" for p in products) or "(chưa có sản phẩm)"
     return (
-        "➕ <b>Thêm Key</b>\n\nCú pháp:\n<code>/addkey product_id key1 key2 key3...</code>\n\n"
-        "Ví dụ:\n<code>/addkey key_1m KEY-ABC-123 KEY-DEF-456</code>\n\n"
+        "➕ <b>Thêm Key / Tài Khoản</b>\n\n"
+        "Cú pháp:\n<code>/addkey product_id user1|pass1 user2|pass2 ...</code>\n\n"
+        "Ví dụ:\n<code>/addkey acc_lq admin|123456 user2|abcdef</code>\n\n"
         f"Product ID hiện có:\n{ids}"
     )
 
 
 def orders_view(user_id: int) -> str:
-    # Lấy thêm cột quantity, nếu đơn cũ không có thì fallback về 1
     orders = (
         supabase.table("orders").select("id, status, quantity, products(name)")
         .eq("user_id", user_id).order("id", desc=True).limit(10).execute().data or []
@@ -188,7 +188,7 @@ ADMIN_HELP = (
     "<code>/setdesc id Mô tả mới</code>\n"
     "<code>/delprod id</code>\n\n"
     "<b>Key</b>\n"
-    "<code>/addkey id key1 key2 key3...</code> (có thể xuống dòng)\n"
+    "<code>/addkey id user|pass user|pass ...</code> (có thể xuống dòng)\n"
     "<code>/stock</code> - xem tồn kho\n\n"
     "<b>Khác</b>\n"
     "<code>/broadcast nội dung</code> - gửi cho mọi người dùng"
@@ -257,7 +257,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product = res.data[0]
         name, price = product["name"], product["price"]
 
-        # Các mức số lượng nhanh để khách bấm cho lẹ (1, 3, 5, 10 hoặc giới hạn theo tồn kho)
         qty_options = [1, 2, 3, 5, 10]
         row_btns = []
         for q in qty_options:
@@ -267,7 +266,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         kb_rows = [row_btns] if row_btns else []
         
-        # Nút xác nhận mua với số lượng hiện tại
         total_price = price * current_qty
         kb_rows.append([InlineKeyboardButton(f"🛒 Xác nhận mua {current_qty} cái ({total_price:,}đ)", callback_data=f"buy:{product_id}:{current_qty}")])
         kb_rows.append([InlineKeyboardButton("⬅️ Quay lại danh sách", callback_data="show_products")])
@@ -303,7 +301,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name, unit_price = product["name"], product["price"]
         total_price = unit_price * quantity
 
-        # Lưu đơn hàng kèm số lượng (quantity)
         order = (
             supabase.table("orders")
             .insert({
@@ -470,7 +467,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, text, InlineKeyboardMarkup(buttons))
         await query.answer()
 
-    # ---------- Admin Duyệt Đơn (Hỗ trợ cấp đủ số lượng key) ----------
+    # ---------- Admin Duyệt Đơn (BỔ SUNG GỬI KEY 2 CHIỀU) ----------
     elif data.startswith("approve:"):
         if not is_admin(user.id):
             await query.answer("Không có quyền!", show_alert=True)
@@ -493,7 +490,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product_name = (order.get("products") or {}).get("name", "")
         required_qty = order.get("quantity", 1)
 
-        # Lấy danh sách key theo số lượng khách mua
+        # Lấy danh sách key_code từ database
         k_res = (
             supabase.table("keys")
             .select("id, key_code")
@@ -504,7 +501,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if not k_res.data or len(k_res.data) < required_qty:
-            await query.answer(f"Không đủ key trong kho! (Cần {required_qty}, còn lại {len(k_res.data) if k_res.data else 0})", show_alert=True)
+            await query.answer(f"Không đủ key trong kho! (Cần {required_qty}, còn {len(k_res.data) if k_res.data else 0})", show_alert=True)
             return
 
         acquired_keys = []
@@ -520,7 +517,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Lỗi xung đột kho khi lấy key, vui lòng thử lại!", show_alert=True)
             return
 
-        # Gộp tất cả key thành chuỗi để lưu và gửi khách
         all_keys_str = "\n".join(acquired_keys)
 
         supabase.table("orders").update({
@@ -528,29 +524,44 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "key_code": all_keys_str
         }).eq("id", order_id).execute()
 
+        # 1. Gửi key cho khách hàng
         try:
             keys_display = "\n".join(f"<code>{esc(kc)}</code>" for kc in acquired_keys)
             await context.bot.send_message(
                 customer_id,
                 f"🎉 <b>Đơn hàng #{order_id} đã được duyệt!</b>\n\n"
                 f"Sản phẩm: {esc(product_name)} (SL: {required_qty})\n"
-                f"Key của bạn:\n{keys_display}",
+                f"Thông tin của bạn:\n{keys_display}",
                 parse_mode="HTML",
             )
-            await query.answer("Đã gửi key thành công!")
         except Exception as e:
-            await query.answer("Không gửi được tin cho khách, xem tin nhắn bên dưới", show_alert=True)
             await context.bot.send_message(
                 ADMIN_ID,
                 f"⚠️ Không gửi được key cho khách <code>{customer_id}</code> (đơn #{order_id}): {esc(e)}\n"
                 f"Keys:\n<code>{esc(all_keys_str)}</code>",
                 parse_mode="HTML",
             )
+
+        # 2. Gửi thông báo lại cho Admin (Bạn) để nắm tình hình
+        try:
+            admin_log_msg = (
+                f"✅ <b>BẠN ĐÃ DUYỆT ĐƠN #{order_id}</b>\n\n"
+                f"👤 Khách: <a href='tg://user?id={customer_id}'>{customer_id}</a>\n"
+                f"🎮 Sản phẩm: {esc(product_name)} (SL: {required_qty})\n"
+                f"🔑 Key đã giao:\n<code>{esc(all_keys_str)}</code>"
+            )
+            await context.bot.send_message(ADMIN_ID, admin_log_msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Lỗi gửi log cho Admin: {e}")
+
+        # Cập nhật trạng thái nút bấm trên tin nhắn gốc
         try:
             base = query.message.text or query.message.caption or ""
             await query.message.edit_text(base + f"\n\n✅ Đã duyệt đơn #{order_id} (SL: {required_qty})", reply_markup=None)
         except Exception:
             pass
+        
+        await query.answer("Đã duyệt và gửi key thành công!")
 
     elif data.startswith("reject:"):
         if not is_admin(user.id):
@@ -670,9 +681,11 @@ async def cmd_addkey(update, context):
         await update.message.reply_text("Cú pháp: /addkey id key1 key2 key3...")
         return
     pid, keys = parts[1], list(dict.fromkeys(parts[2:]))  # bỏ key trùng trong cùng lệnh
+    
     if not supabase.table("products").select("id").eq("id", pid).execute().data:
         await update.message.reply_text(f"❌ Không có sản phẩm '{pid}'. Xem /stock để biết ID.")
         return
+        
     supabase.table("keys").insert(
         [{"product_id": pid, "key_code": k, "is_sold": False} for k in keys]
     ).execute()
@@ -702,45 +715,4 @@ async def cmd_broadcast(update, context):
 
 
 # ==================== ĐĂNG KÝ HANDLERS ====================
-telegram_app.add_handler(CommandHandler("start", cmd_start))
-telegram_app.add_handler(CommandHandler("help", cmd_help))
-telegram_app.add_handler(CommandHandler("orders", cmd_orders))
-telegram_app.add_handler(MessageHandler(filters.Text([BTN_SHOP]), msg_shop))
-telegram_app.add_handler(MessageHandler(filters.Text([BTN_ADMIN]), msg_admin))
-telegram_app.add_handler(CommandHandler("addprod", cmd_addprod))
-telegram_app.add_handler(CommandHandler("setprice", cmd_setprice))
-telegram_app.add_handler(CommandHandler("setname", cmd_setname))
-telegram_app.add_handler(CommandHandler("setdesc", cmd_setdesc))
-telegram_app.add_handler(CommandHandler("delprod", cmd_delprod))
-telegram_app.add_handler(CommandHandler("addkey", cmd_addkey))
-telegram_app.add_handler(CommandHandler("stock", cmd_stock))
-telegram_app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-telegram_app.add_handler(CallbackQueryHandler(handle_callback))
-
-
-# ==================== FASTAPI & TELEGRAM STARTUP ====================
-@app.on_event("startup")
-async def startup_event():
-    try:
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.updater.start_polling()
-        logger.info("✅ Telegram Bot đã khởi động chạy Polling thành công!")
-    except Exception as e:
-        logger.error(f"❌ Lỗi khởi động bot: {e}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    try:
-        await telegram_app.updater.stop()
-        await telegram_app.stop()
-        await telegram_app.shutdown()
-        logger.info("🛑 Đã tắt Bot và Web server.")
-    except Exception as e:
-        logger.error(f"Lỗi khi tắt: {e}")
-
-
-@app.get("/")
-def health():
-    return {"status": "running"}
+telegram_app.add_handler(
