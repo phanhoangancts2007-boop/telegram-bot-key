@@ -122,17 +122,18 @@ async def cmd_setbank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Cú pháp: /setbank Tên Bank | STK | Tên | BIN\nVD: /setbank Vietcombank | 123456 | Nguyen Van A | 970436")
     
     try:
+        # Thêm defaultToNull=False để tránh lỗi cột last_seen bị NULL
         supabase.table("admin_status").upsert({
             "user_id": update.effective_user.id, 
             "bank_name": parts[0], 
             "account_number": parts[1], 
             "account_name": parts[2], 
             "bank_bin": parts[3]
-        }).execute()
+        }, defaultToNull=False).execute()
         await update.message.reply_text("✅ Đã lưu Bank cá nhân!")
     except Exception as e:
         logger.error(f"Lỗi lưu bank: {e}")
-        await update.message.reply_text("❌ Lỗi lưu Bank, vui lòng thử lại.")
+        await update.message.reply_text(f"❌ Lỗi lưu Bank: {e}")
 
 # ==================== LUỒNG MUA HÀNG ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
