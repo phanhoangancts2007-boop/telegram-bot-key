@@ -21,13 +21,16 @@ from supabase import create_client, Client
 # ==================== LOGGING ====================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)  # tránh in token bot vào log
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ==================== BIẾN MÔI TRƯỜNG ====================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_KEY"]  # dùng service_role key (giữ bí mật)
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
+
+# Lấy danh sách Admin từ biến môi trường ADMIN_IDS (cách nhau bởi dấu phẩy)
+ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "0")
+ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_RAW.split(",") if id.strip().isdigit()]
 
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0352836546")
@@ -41,7 +44,8 @@ telegram_app = Application.builder().token(BOT_TOKEN).build()
 
 # ==================== HÀM TRỢ GIÚP ====================
 def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
+    """Kiểm tra xem ID người dùng có nằm trong danh sách Admin không"""
+    return user_id in ADMIN_IDS
 
 
 def esc(s) -> str:
@@ -63,7 +67,6 @@ def _crc16(data: str) -> str:
 
 
 def vietqr_payload(amount: int, content: str) -> str:
-    """Chuỗi VietQR (NAPAS 247) chuẩn, có CRC."""
     bank = _tlv("00", BANK_BIN) + _tlv("01", ACCOUNT_NUMBER)
     merchant = _tlv("00", "A000000727") + _tlv("01", bank) + _tlv("02", "QRIBFTTA")
     p = (
@@ -95,7 +98,6 @@ def stock_of(product_id: str) -> int:
 
 
 async def safe_edit(query, text, kb=None):
-    """Sửa tin nhắn; nếu tin nhắn là ảnh (không sửa được text) thì gửi tin mới."""
     try:
         await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     except BadRequest as e:
@@ -116,7 +118,6 @@ def reply_menu(user_id: int) -> ReplyKeyboardMarkup:
 
 
 def products_view():
-    """Giao diện 'Danh sách sản phẩm' + nút Mua cho mặt hàng còn hàng."""
     products = supabase.table("products").select("*").order("sort_order").execute().data or []
     if not products:
         return "🛒 <b>Danh sách sản phẩm</b>\n\nHiện chưa có sản phẩm nào.", None
@@ -162,7 +163,6 @@ def addkey_help_text() -> str:
 
 
 def orders_view(user_id: int) -> str:
-    # Lấy thêm cột quantity, nếu đơn cũ không có thì fallback về 1
     orders = (
         supabase.table("orders").select("id, status, quantity, products(name)")
         .eq("user_id", user_id).order("id", desc=True).limit(10).execute().data or []
@@ -232,13 +232,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     user = query.from_user
 
-    # ---------- Danh sách sản phẩm ----------
     if data == "show_products":
         text, kb = products_view()
         await safe_edit(query, text, kb)
         await query.answer()
 
-    # ---------- Chọn số lượng trước khi mua (select_qty:product_id:quantity) ----------
     elif data.startswith("select_qty:"):
         parts = data.split(":")
         product_id = parts[1]
@@ -281,7 +279,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, text, InlineKeyboardMarkup(kb_rows))
         await query.answer()
 
-    # ---------- Tạo đơn hàng (buy:product_id:quantity) ----------
     elif data.startswith("buy:"):
         parts = data.split(":")
         product_id = parts[1]
@@ -315,22 +312,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = order["id"]
         content = f"DH{order_id}"
 
+        # Gửi thông báo cho TẤT CẢ admin trong danh sách
         try:
             admin_kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton(f"✅ Duyệt đơn #{order_id}", callback_data=f"approve:{order_id}"),
                   InlineKeyboardButton("❌ Hủy", callback_data=f"reject:{order_id}")]]
             )
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"🔔 <b>ĐƠN HÀNG MỚI #{order_id}</b>\n\n"
-                f"👤 <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a>\n"
-                f"🆔 <code>{user.id}</code>\n"
-                f"🎮 {esc(name)} (SL: <b>{quantity}</b>)\n"
-                f"💰 Tổng tiền: <b>{total_price:,}đ</b>",
-                reply_markup=admin_kb, parse_mode="HTML",
-            )
+            for admin_id in ADMIN_IDS:
+                if admin_id != 0:
+                    try:
+                        await context.bot.send_message(
+                            admin_id,
+                            f"🔔 <b>ĐƠN HÀNG MỚI #{order_id}</b>\n\n"
+                            f"👤 <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a>\n"
+                            f"🆔 <code>{user.id}</code>\n"
+                            f"🎮 {esc(name)} (SL: <b>{quantity}</b>)\n"
+                            f"💰 Tổng tiền: <b>{total_price:,}đ</b>",
+                            reply_markup=admin_kb, parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        logger.error(f"Lỗi gửi thông báo cho Admin {admin_id}: {e}")
         except Exception as e:
-            logger.error(f"Lỗi gửi thông báo cho Admin: {e}")
+            logger.error(f"Lỗi tạo nút duyệt đơn: {e}")
 
         caption = (
             f"✅ <b>Đã tạo đơn hàng #{order_id}</b>\n\n"
@@ -359,7 +362,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(caption, reply_markup=kb, parse_mode="HTML")
         await query.answer()
 
-    # ---------- Khách báo đã chuyển khoản ----------
     elif data.startswith("paid:"):
         order_id = int(data.split(":")[1])
         res = supabase.table("orders").select("*, products(name, price)").eq("id", order_id).execute()
@@ -377,20 +379,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = order.get("products") or {}
         qty = order.get("quantity", 1)
         total_p = p.get('price', 0) * qty
+        
+        # Gửi thông báo xác nhận cho TẤT CẢ admin
         try:
             kb = InlineKeyboardMarkup(
                 [[InlineKeyboardButton(f"✅ Duyệt đơn #{order_id}", callback_data=f"approve:{order_id}"),
                   InlineKeyboardButton("❌ Hủy", callback_data=f"reject:{order_id}")]]
             )
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"📢 <b>KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN</b>\n\n"
-                f"Đơn: <b>#{order_id}</b> (SL: {qty})\n"
-                f"Khách: <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a> (<code>{user.id}</code>)\n"
-                f"Sản phẩm: {esc(p.get('name'))}\nTổng tiền: {total_p:,}đ\n\n"
-                f"Hãy kiểm tra tài khoản rồi duyệt đơn.",
-                reply_markup=kb, parse_mode="HTML",
-            )
+            for admin_id in ADMIN_IDS:
+                if admin_id != 0:
+                    try:
+                        await context.bot.send_message(
+                            admin_id,
+                            f"📢 <b>KHÁCH XÁC NHẬN ĐÃ CHUYỂN KHOẢN</b>\n\n"
+                            f"Đơn: <b>#{order_id}</b> (SL: {qty})\n"
+                            f"Khách: <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a> (<code>{user.id}</code>)\n"
+                            f"Sản phẩm: {esc(p.get('name'))}\nTổng tiền: {total_p:,}đ\n\n"
+                            f"Hãy kiểm tra tài khoản rồi duyệt đơn.",
+                            reply_markup=kb, parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        logger.error(f"Lỗi gửi xác nhận cho Admin {admin_id}: {e}")
         except Exception as e:
             logger.error(f"Lỗi thông báo xác nhận: {e}")
 
@@ -404,7 +413,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         await query.answer("Đã gửi xác nhận cho admin!")
 
-    # ==================== ADMIN ====================
     elif data == "admin_panel":
         if not is_admin(user.id):
             await query.answer("Không có quyền!", show_alert=True)
@@ -467,7 +475,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, text, InlineKeyboardMarkup(buttons))
         await query.answer()
 
-    # ---------- Admin Duyệt Đơn (BỔ SUNG GỬI KEY 2 CHIỀU) ----------
     elif data.startswith("approve:"):
         if not is_admin(user.id):
             await query.answer("Không có quyền!", show_alert=True)
@@ -490,7 +497,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         product_name = (order.get("products") or {}).get("name", "")
         required_qty = order.get("quantity", 1)
 
-        # Lấy danh sách key_code từ database
         k_res = (
             supabase.table("keys")
             .select("id, key_code")
@@ -524,7 +530,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "key_code": all_keys_str
         }).eq("id", order_id).execute()
 
-        # 1. Gửi key cho khách hàng
+        # Gửi key cho khách
         try:
             keys_display = "\n".join(f"<code>{esc(kc)}</code>" for kc in acquired_keys)
             await context.bot.send_message(
@@ -535,26 +541,35 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML",
             )
         except Exception as e:
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"⚠️ Không gửi được key cho khách <code>{customer_id}</code> (đơn #{order_id}): {esc(e)}\n"
-                f"Keys:\n<code>{esc(all_keys_str)}</code>",
-                parse_mode="HTML",
-            )
+            for admin_id in ADMIN_IDS:
+                if admin_id != 0:
+                    try:
+                        await context.bot.send_message(
+                            admin_id,
+                            f"⚠️ Không gửi được key cho khách <code>{customer_id}</code> (đơn #{order_id}): {esc(e)}\n"
+                            f"Keys:\n<code>{esc(all_keys_str)}</code>",
+                            parse_mode="HTML",
+                        )
+                    except:
+                        pass
 
-        # 2. Gửi thông báo lại cho Admin để nắm tình hình
+        # Gửi log cho TẤT CẢ admin
         try:
             admin_log_msg = (
-                f"✅ <b>BẠN ĐÃ DUYỆT ĐƠN #{order_id}</b>\n\n"
+                f"✅ <b>ĐÃ DUYỆT ĐƠN #{order_id}</b>\n\n"
                 f"👤 Khách: <a href='tg://user?id={customer_id}'>{customer_id}</a>\n"
                 f"🎮 Sản phẩm: {esc(product_name)} (SL: {required_qty})\n"
                 f"🔑 Key đã giao:\n<code>{esc(all_keys_str)}</code>"
             )
-            await context.bot.send_message(ADMIN_ID, admin_log_msg, parse_mode="HTML")
+            for admin_id in ADMIN_IDS:
+                if admin_id != 0:
+                    try:
+                        await context.bot.send_message(admin_id, admin_log_msg, parse_mode="HTML")
+                    except:
+                        pass
         except Exception as e:
             logger.error(f"Lỗi gửi log cho Admin: {e}")
 
-        # Cập nhật trạng thái nút bấm trên tin nhắn gốc
         try:
             base = query.message.text or query.message.caption or ""
             await query.message.edit_text(base + f"\n\n✅ Đã duyệt đơn #{order_id} (SL: {required_qty})", reply_markup=None)
@@ -680,7 +695,7 @@ async def cmd_addkey(update, context):
     if len(parts) < 3:
         await update.message.reply_text("Cú pháp: /addkey id key1 key2 key3...")
         return
-    pid, keys = parts[1], list(dict.fromkeys(parts[2:]))  # bỏ key trùng trong cùng lệnh
+    pid, keys = parts[1], list(dict.fromkeys(parts[2:]))
     if not supabase.table("products").select("id").eq("id", pid).execute().data:
         await update.message.reply_text(f"❌ Không có sản phẩm '{pid}'. Xem /stock để biết ID.")
         return
