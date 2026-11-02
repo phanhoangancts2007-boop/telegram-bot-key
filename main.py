@@ -28,7 +28,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "0")
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_RAW.split(",") if id.strip().isdigit()]
 
-# Tài khoản mặc định (nếu không ai nhận đơn)
+# Tài khoản mặc định (nếu không ai nhận đơn trong 15s)
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0352836546")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
@@ -102,7 +102,7 @@ def admin_panel_view():
     ])
     return "🛠 <b>Admin Panel</b>", kb
 
-# ==================== LỆNH USER ====================
+# ==================== LỆNH USER & ADMIN ====================
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supabase.table("bot_users").upsert({"user_id": update.effective_user.id, "full_name": update.effective_user.full_name}).execute()
     await update.message.reply_text(f"Xin chào {esc(update.effective_user.first_name)}!", reply_markup=reply_menu(update.effective_user.id))
@@ -118,9 +118,21 @@ async def cmd_setbank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     raw = update.message.text.split(maxsplit=1)
     parts = [x.strip() for x in raw[1].split("|")] if len(raw) > 1 else []
-    if len(parts) < 4: return await update.message.reply_text("Cú pháp: /setbank Tên Bank | STK | Tên | BIN")
-    supabase.table("admin_status").upsert({"user_id": update.effective_user.id, "bank_name": parts[0], "account_number": parts[1], "account_name": parts[2], "bank_bin": parts[3]}).execute()
-    await update.message.reply_text("✅ Đã lưu Bank cá nhân!")
+    if len(parts) < 4: 
+        return await update.message.reply_text("Cú pháp: /setbank Tên Bank | STK | Tên | BIN\nVD: /setbank Vietcombank | 123456 | Nguyen Van A | 970436")
+    
+    try:
+        supabase.table("admin_status").upsert({
+            "user_id": update.effective_user.id, 
+            "bank_name": parts[0], 
+            "account_number": parts[1], 
+            "account_name": parts[2], 
+            "bank_bin": parts[3]
+        }).execute()
+        await update.message.reply_text("✅ Đã lưu Bank cá nhân!")
+    except Exception as e:
+        logger.error(f"Lỗi lưu bank: {e}")
+        await update.message.reply_text("❌ Lỗi lưu Bank, vui lòng thử lại.")
 
 # ==================== LUỒNG MUA HÀNG ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -144,7 +156,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         return
 
-    # --- KHÁCH BẤM MUA ---
     elif data.startswith("buy:"):
         parts = data.split(":"); p_id, qty = parts[1], int(parts[2])
         res = supabase.table("products").select("*").eq("id", p_id).execute()
@@ -152,17 +163,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p = res.data[0]
         total = p["price"] * qty
         
-        # Tạo đơn hàng
         order = supabase.table("orders").insert({"user_id": user.id, "product_id": p_id, "quantity": qty, "status": "pending"}).execute().data[0]
         o_id = order["id"]
         
-        # Lưu tạm
         pending_orders[o_id] = {
             "user_id": user.id, "product_name": p["name"], 
             "quantity": qty, "total": total, "chosen_bank": None
         }
 
-        # Gửi thông báo cho TẤT CẢ admin
         admin_kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"🏦 NHẬN ĐƠN NÀY (Mã #{o_id})", callback_data=f"claim:{o_id}")]])
         msg_text = f"🔔 <b>KHÁCH ĐANG CHỜ THANH TOÁN (Mã #{o_id})</b>\n\nSP: {esc(p['name'])} (SL: {qty})\nTổng: {total:,}đ\n\nAi bấm nút bên dưới để nhận đơn (Khách sẽ nhận QR của bạn). Hết 15s hệ thống lấy Bank mặc định!"
         
@@ -171,11 +179,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: await context.bot.send_message(ad, msg_text, reply_markup=admin_kb, parse_mode="HTML")
                 except: pass
 
-        # Báo khách chờ 15s
         await query.message.edit_text(f"⏳ Đang kết nối với Admin. Vui lòng chờ tối đa 15 giây...", reply_markup=None)
         await query.answer()
 
-        # Hẹn 15s sau check lại
         async def timeout_handler():
             await asyncio.sleep(15)
             if pending_orders.get(o_id) and pending_orders[o_id]["chosen_bank"] is None:
@@ -184,7 +190,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(timeout_handler())
         return
 
-    # --- ADMIN BẤM NHẬN ĐƠN ---
     elif data.startswith("claim:"):
         o_id = int(data.split(":")[1])
         if not is_admin(user.id): return await query.answer("Không có quyền!", show_alert=True)
@@ -193,19 +198,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_data = pending_orders[o_id]
         if order_data["chosen_bank"] is not None: return await query.answer("Đã có Admin khác nhận đơn này rồi!", show_alert=True)
 
-        # Lấy bank của Admin
         ad_info = supabase.table("admin_status").select("*").eq("user_id", user.id).execute().data
         if not ad_info or not ad_info[0].get("bank_name"): return await query.answer("Bạn chưa cài Bank! Gõ /setbank trước.", show_alert=True)
 
-        # Chốt bank
         order_data["chosen_bank"] = ad_info[0]
         await query.message.edit_text(f"✅ Bạn đã nhận đơn #{o_id}!\nKhách đang được gửi QR thanh toán tới Bank của bạn.", reply_markup=None)
         
-        # Gửi QR cho khách
         await generate_and_send_qr(context, order_data["user_id"], o_id, f"Bank của Admin {user.first_name}")
         await query.answer("Nhận đơn thành công!")
 
-    # --- CÁC NÚT KHÁC ---
     elif data == "admin_panel":
         if not is_admin(user.id): return await query.answer("Không có quyền!", show_alert=True)
         text, kb = admin_panel_view(); await safe_edit(query, text, kb); await query.answer()
