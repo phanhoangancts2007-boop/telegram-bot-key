@@ -28,7 +28,6 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "0")
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_RAW.split(",") if id.strip().isdigit()]
 
-# Tài khoản mặc định (nếu không ai nhận đơn trong 15s)
 BANK_NAME = os.environ.get("BANK_NAME", "MB Bank")
 ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "0352836546")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "Phan Hoang An")
@@ -38,7 +37,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Bộ nhớ tạm lưu các đơn đang chờ Admin nhận
 pending_orders = {}
 
 # ==================== HÀM CƠ BẢN ====================
@@ -122,14 +120,26 @@ async def cmd_setbank(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Cú pháp: /setbank Tên Bank | STK | Tên | BIN\nVD: /setbank Vietcombank | 123456 | Nguyen Van A | 970436")
     
     try:
-        # Thêm defaultToNull=False để tránh lỗi cột last_seen bị NULL
-        supabase.table("admin_status").upsert({
-            "user_id": update.effective_user.id, 
+        user_id = update.effective_user.id
+        # Kiểm tra xem đã có thông tin trong bảng chưa
+        existing = supabase.table("admin_status").select("user_id").eq("user_id", user_id).execute()
+        
+        data = {
             "bank_name": parts[0], 
             "account_number": parts[1], 
             "account_name": parts[2], 
             "bank_bin": parts[3]
-        }, defaultToNull=False).execute()
+        }
+        
+        if existing.data:
+            # Nếu có rồi thì Update
+            supabase.table("admin_status").update(data).eq("user_id", user_id).execute()
+        else:
+            # Nếu chưa có thì Insert (kèm user_id và last_seen)
+            data["user_id"] = user_id
+            data["last_seen"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            supabase.table("admin_status").insert(data).execute()
+            
         await update.message.reply_text("✅ Đã lưu Bank cá nhân!")
     except Exception as e:
         logger.error(f"Lỗi lưu bank: {e}")
