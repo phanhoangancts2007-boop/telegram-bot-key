@@ -68,8 +68,10 @@ def stock_of(product_id):
     return res.count or 0
 
 def is_maintenance():
-    res = supabase.table("settings").select("value").eq("key", "maintenance").execute()
-    return res.data and res.data[0]["value"] == "true"
+    try:
+        res = supabase.table("settings").select("value").eq("key", "maintenance").execute()
+        return res.data and res.data[0]["value"] == "true"
+    except: return False
 
 async def safe_edit(query, text, kb=None):
     try: await query.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -91,8 +93,7 @@ def products_view():
     
     text, buttons = "🛒 <b>Danh sách sản phẩm</b>\n\n", []
     maint = is_maintenance()
-    if maint:
-        text += "⚠️ <b>SHOP ĐANG BẢO TRÌ, VUI LÒNG QUAY LẠI SAU!</b>\n\n"
+    if maint: text += "⚠️ <b>SHOP ĐANG BẢO TRÌ, VUI LÒNG QUAY LẠI SAU!</b>\n\n"
 
     for p in products:
         stock = stock_of(p["id"])
@@ -101,7 +102,6 @@ def products_view():
         text += "\n"
         if stock > 0 and not maint: 
             buttons.append([InlineKeyboardButton(f"Mua {p['name']}", callback_data=f"select_qty:{p['id']}:1")])
-    
     return text, (InlineKeyboardMarkup(buttons) if buttons else None)
 
 def admin_panel_view():
@@ -126,7 +126,8 @@ async def msg_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setbank(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    parts = [x.strip() for x in update.message.text.split(maxsplit=1)[1].split("|")] if len(update.message.text.split(maxsplit=1)) > 1 else []
+    raw = update.message.text.split(maxsplit=1)
+    parts = [x.strip() for x in raw[1].split("|")] if len(raw) > 1 else []
     if len(parts) < 4: return await update.message.reply_text("Cú pháp: /setbank Tên Bank | STK | Tên | BIN")
     try:
         user_id = update.effective_user.id
@@ -153,10 +154,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 <code>/stats</code> (Xem doanh thu)\n"
         "👉 <code>/find Mã_Đơn</code> (Tìm đơn hàng)\n"
         "👉 <code>/addcoupon Mã | percent/fixed | Số_giảm</code>\n"
-        "👉 <code>/delcoupon Mã</code>\n"
         "👉 <code>/maintenance on/off</code> (Bật/tắt bảo trì)\n"
         "👉 <code>/broadcast Nội_dung</code> (Gửi tất cả khách)\n"
-        "👉 <code>/addmoney ID_Số_tiền</code> (Cộng tiền cho khách)\n"
+        "👉 <code>/addmoney ID Số_tiền</code> (Cộng/trừ tiền khách)\n"
     )
     await update.message.reply_text(text, parse_mode="HTML")
 
@@ -242,7 +242,7 @@ async def cmd_addcoupon(update, context):
     parts = update.message.text.split(maxsplit=1)
     data = [x.strip() for x in parts[1].split("|")] if len(parts) > 1 else []
     if len(data) < 3 or data[1] not in ["percent", "fixed"]:
-        return await update.message.reply_text("Cú pháp: /addcoupon Mã | percent/fixed | Số_giảm\nVD: /addcoupon TET2024 | percent | 10")
+        return await update.message.reply_text("Cú pháp: /addcoupon Mã | percent/fixed | Số_giảm\nVD: /addcoupon TET | percent | 10")
     supabase.table("coupons").upsert({"code": data[0].upper(), "discount_type": data[1], "discount_value": int(data[2]), "is_active": True}).execute()
     await update.message.reply_text(f"✅ Đã tạo mã {data[0].upper()} giảm {data[2]} {'%' if data[1]=='percent' else 'đ'}")
 
@@ -253,6 +253,20 @@ async def cmd_find(update, context):
     o = res.data[0]
     text = f"🔍 <b>Đơn #{o['id']}</b>\nKhách: <code>{o['user_id']}</code>\nSP: {o['products']['name']} (SL: {o['quantity']})\nTrạng thái: {o['status']}\nKey: <code>{o.get('key_code', 'Chưa có')}</code>"
     await update.message.reply_text(text, parse_mode="HTML")
+
+async def cmd_addmoney(update, context):
+    if not is_admin(update.effective_user.id): return
+    if len(context.args) != 2 or not context.args[1].replace("-", "").isdigit():
+        return await update.message.reply_text("Cú pháp: /addmoney ID Số_tiền\nVD: /addmoney 12345 50000")
+    user_id = int(context.args[0]); amount = int(context.args[1])
+    res = supabase.table("bot_users").select("balance").eq("user_id", user_id).execute()
+    if not res.data: return await update.message.reply_text("❌ Không tìm thấy user.")
+    old_bal = res.data[0].get("balance", 0) or 0
+    new_bal = old_bal + amount
+    supabase.table("bot_users").update({"balance": new_bal}).eq("user_id", user_id).execute()
+    try: await context.bot.send_message(user_id, f"💰 Số dư của bạn đã được Admin cập nhật: <b>{amount:+,}đ</b>\nSố dư hiện tại: <b>{new_bal:,}đ</b>", parse_mode="HTML")
+    except: pass
+    await update.message.reply_text(f"✅ Đã cập nhật số dư cho {user_id}. Số dư mới: {new_bal:,}đ")
 
 # ==================== LUỒNG MUA HÀNG ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -370,10 +384,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for k in k_res.data:
             if supabase.table("keys").update({"is_sold": True}).eq("id", k["id"]).eq("is_sold", False).execute().data: keys.append(k["key_code"])
         
-        supabase.table("orders").update({"status": "completed", "key_code": "\n".join(keys)}).eq("id", o_id).execute()
+        all_keys_str = "\n".join(keys)
+        supabase.table("orders").update({"status": "completed", "key_code": all_keys_str}).eq("id", o_id).execute()
         
-        try: await context.bot.send_message(o["user_id"], f"🎉 Đơn #{o_id} duyệt thành công!\nKey:\n" + "\n".join([f"<code>{k}</code>" for k in keys]), parse_mode="HTML")
+        # 1. Gửi key cho khách
+        try: 
+            await context.bot.send_message(o["user_id"], f"🎉 Đơn #{o_id} duyệt thành công!\nKey:\n" + "\n".join([f"<code>{k}</code>" for k in keys]), parse_mode="HTML")
         except: pass
+        
+        # 2. Gửi log báo cáo lại cho Admin
+        admin_log_msg = (
+            f"✅ <b>BẠN ĐÃ DUYỆT ĐƠN #{o_id}</b>\n\n"
+            f"👤 Khách: <a href='tg://user?id={o['user_id']}'>{o['user_id']}</a>\n"
+            f"🎮 Sản phẩm: {esc(o['products']['name'])} (SL: {req_qty})\n"
+            f"🔑 Key đã giao:\n<code>{esc(all_keys_str)}</code>"
+        )
+        for ad in ADMIN_IDS:
+            if ad != 0:
+                try: await context.bot.send_message(ad, admin_log_msg, parse_mode="HTML")
+                except: pass
         
         await query.message.edit_text(f"✅ Đã duyệt #{o_id}", reply_markup=None)
         await query.answer("Đã duyệt!")
@@ -436,6 +465,7 @@ telegram_app.add_handler(CommandHandler("find", cmd_find))
 telegram_app.add_handler(CommandHandler("addcoupon", cmd_addcoupon))
 telegram_app.add_handler(CommandHandler("maintenance", cmd_maintenance))
 telegram_app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+telegram_app.add_handler(CommandHandler("addmoney", cmd_addmoney))
 telegram_app.add_handler(MessageHandler(filters.Text([BTN_SHOP]), msg_shop))
 telegram_app.add_handler(MessageHandler(filters.Text([BTN_ADMIN]), msg_admin))
 telegram_app.add_handler(CallbackQueryHandler(handle_callback))
