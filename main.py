@@ -281,9 +281,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
-            # Gửi tin nhắn text chứa nút thanh toán
+            # Gửi tin nhắn text chứa nút thanh toán và nút xác nhận thủ công
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 Thanh toán ngay", url=payment_link.checkout_url)],
+                [InlineKeyboardButton("✅ Tôi đã chuyển khoản", callback_data=f"check_paid:{o_id}")],
                 [InlineKeyboardButton("⬅️ Quay lại", callback_data="show_products")]
             ])
             
@@ -302,6 +303,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.answer()
         return
+
+    # ==================== XỬ LÝ KHI KHÁCH BẤM "TÔI ĐÃ CHUYỂN KHOẢN" ====================
+    elif data.startswith("check_paid:"):
+        o_id = int(data.split(":")[1])
+        
+        # Thông báo cho khách là đang kiểm tra
+        await query.answer("Đang kiểm tra giao dịch với payOS...", show_alert=True)
+        
+        try:
+            # Gọi API payOS để lấy thông tin thanh toán của đơn hàng này
+            # Sử dụng phương thức getPaymentLinkInformation của SDK
+            payment_info = await payos_client.getPaymentLinkInformation(order_id=o_id)
+            
+            # Kiểm tra trạng thái thanh toán (status thường là "PAID" nếu thành công)
+            if payment_info.status == "PAID":
+                # Nếu thành công, xử lý nhả key (tương tự logic trong webhook)
+                o_res = supabase.table("orders").select("*, products(name)").eq("id", o_id).eq("status", "pending").execute()
+                if o_res.data:
+                    o = o_res.data[0]
+                    req_qty = o.get("quantity", 1)
+                    
+                    # Lấy key từ kho
+                    k_res = supabase.table("keys").select("id, key_code").eq("product_id", o["product_id"]).eq("is_sold", False).limit(req_qty).execute()
+                    if k_res.data and len(k_res.data) >= req_qty:
+                        keys = []
+                        for k in k_res.data:
+                            supabase.table("keys").update({"is_sold": True}).eq("id", k["id"]).eq("is_sold", False).execute()
+                            keys.append(k["key_code"])
+                        
+                        all_keys_str = "\n".join(keys)
+                        supabase.table("orders").update({"status": "completed", "key_code": all_keys_str}).eq("id", o_id).execute()
+                        
+                        # Gửi key cho khách
+                        await context.bot.send_message(
+                            o["user_id"], 
+                            f"🎉 Thanh toán thành công! Đơn hàng #{o_id}\nKey của bạn:\n" + "\n".join([f"<code>{k}</code>" for k in keys]), 
+                            parse_mode="HTML"
+                        )
+                        await query.message.edit_text(f"✅ Đơn hàng #{o_id} đã được xác nhận thanh toán và đã gửi key.", reply_markup=None)
+                    else:
+                        await query.message.edit_text(f"⚠️ Đơn hàng #{o_id} đã thanh toán nhưng kho tạm hết key. Vui lòng liên hệ Admin.", reply_markup=None)
+                else:
+                    await query.message.edit_text(f"✅ Đơn hàng #{o_id} đã được xử lý trước đó.", reply_markup=None)
+            else:
+                # Nếu chưa thanh toán
+                await query.message.edit_text(
+                    f"⏳ Hệ thống payOS báo đơn hàng <b>#{o_id}</b> chưa thanh toán thành công.\n"
+                    f"Vui lòng kiểm tra lại giao dịch hoặc thử lại sau ít phút.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Thử lại", callback_data=f"check_paid:{o_id}")]])
+                )
+        except Exception as e:
+            logger.error(f"Lỗi kiểm tra trạng thái thanh toán: {e}")
+            await query.message.edit_text(f"❌ Có lỗi xảy ra khi kiểm tra giao dịch. Vui lòng thử lại sau.", reply_markup=None)
 
     elif data == "admin_panel":
         if not is_admin(user.id): return await query.answer("Không có quyền!", show_alert=True)
