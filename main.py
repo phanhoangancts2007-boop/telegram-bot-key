@@ -319,11 +319,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== WEBHOOK PAYOS ====================
 @app.post("/payos-webhook")
 async def payos_webhook(request: Request):
+    logger.info("--- WEBHOOK ĐÃ ĐƯỢC GỌI ---")
     try:
         body = await request.body()
         
-        # Xác minh chữ ký
-        webhook_data = payos_client.webhooks.verify(body)
+        # Đã thêm await ở đây để sửa lỗi 'coroutine' object has no attribute 'code'
+        webhook_data = await payos_client.webhooks.verify(body)
         
         # Kiểm tra mã code thành công
         if webhook_data.code == "00":
@@ -334,6 +335,7 @@ async def payos_webhook(request: Request):
             # Lấy thông tin đơn hàng
             o_res = supabase.table("orders").select("*, products(name)").eq("id", order_code).eq("status", "pending").execute()
             if not o_res.data:
+                logger.warning(f"Không tìm thấy đơn {order_code} hoặc đã xử lý")
                 return JSONResponse(status_code=200, content={"code": "00", "desc": "success"})
             
             o = o_res.data[0]
@@ -360,6 +362,7 @@ async def payos_webhook(request: Request):
                     f"🎉 Thanh toán thành công! Đơn hàng #{order_code}\nKey của bạn:\n" + "\n".join([f"<code>{k}</code>" for k in keys]), 
                     parse_mode="HTML"
                 )
+                logger.info(f"Đã gửi key cho user {o['user_id']}")
             except Exception as e:
                 logger.error(f"Không thể gửi tin nhắn Telegram: {e}")
         
