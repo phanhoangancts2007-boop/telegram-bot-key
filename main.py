@@ -238,7 +238,7 @@ async def cmd_addmoney(update, context):
     except: pass
     await update.message.reply_text(f"✅ Đã cập nhật số dư cho {user_id}. Số dư mới: {new_bal:,}đ")
 
-# ==================== LUỒNG MUA HÀNG (QR CHUẨN PAYOS) ====================
+# ==================== LUỒNG MUA HÀNG ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, data, user = update.callback_query, update.callback_query.data, update.callback_query.from_user
 
@@ -282,14 +282,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
-            # Lấy chuỗi QR gốc từ payOS (trường qr_code)
-            qr_string = getattr(payment_link, 'qr_code', None)
+            # Lấy chuỗi QR gốc từ payOS (thuộc tính là qrCode, viết hoa chữ C)
+            qr_string = getattr(payment_link, 'qrCode', None)
             
             if qr_string:
                 img = qrcode.make(qr_string, border=2, box_size=8)
             else:
-                # Fallback tự sinh mã QR nếu payOS không trả về (hiếm gặp)
-                import qrcode.image.pil
+                # Fallback nếu payOS ko trả về
                 img = qrcode.make(payment_link.checkout_url, border=2, box_size=8)
             
             bio = BytesIO()
@@ -297,10 +296,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bio.seek(0)
             bio.name = "qr.png"
 
-            # Lấy thông tin hiển thị text cho giống payOS
+            # Lấy thông tin hiển thị text (lấy đúng tên biến camelCase của payOS)
             bank_name = getattr(payment_link, 'bin', 'Ngân hàng')
-            stk = getattr(payment_link, 'account_number', '')
-            acc_name = getattr(payment_link, 'account_name', '')
+            stk = getattr(payment_link, 'accountNumber', '')
+            acc_name = getattr(payment_link, 'accountName', '')
             desc = getattr(payment_link, 'description', f"DH{o_id}")
 
             caption = (
@@ -349,7 +348,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, "🎟 <b>Tạo mã giảm giá:</b>\n<code>/addcoupon Mã | percent/fixed | Số_giảm</code>\n\nVD: <code>/addcoupon TET | percent | 10</code>", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Quay lại", callback_data="admin_panel")]]))
         await query.answer()
 
-# ==================== WEBHOOK PAYOS (TỰ ĐỘNG PHÁT KEY) ====================
+# ==================== WEBHOOK PAYOS ====================
 @app.post("/payos-webhook")
 async def payos_webhook(request: Request):
     try:
