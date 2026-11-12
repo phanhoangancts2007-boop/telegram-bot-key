@@ -68,16 +68,21 @@ async def safe_edit(query, text, kb=None):
     except BadRequest as e:
         if "not modified" not in str(e).lower(): await query.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ==================== HÀM XỬ LÝ ĐƠN HÀNG (DÙNG CHUNG) ====================
+# ==================== HÀM XỬ LÝ ĐƠN HÀNG (2 CHIỀU) ====================
 async def process_order_success(order_code: int):
-    # Lấy thông tin đơn hàng
+    # 1. Lấy thông tin đơn hàng
     o_res = supabase.table("orders").select("*, products(name)").eq("id", order_code).eq("status", "pending").execute()
     if not o_res.data: return False
     
     o = o_res.data[0]
     req_qty = o.get("quantity", 1)
+    user_id = o["user_id"]
     
-    # Lấy key từ kho
+    # 2. Lấy Tên khách hàng từ database để báo cáo cho Admin
+    u_res = supabase.table("bot_users").select("full_name").eq("user_id", user_id).execute()
+    u_name = u_res.data[0]["full_name"] if u_res.data else "Không rõ tên"
+
+    # 3. Lấy key từ kho
     k_res = supabase.table("keys").select("id, key_code").eq("product_id", o["product_id"]).eq("is_sold", False).limit(req_qty).execute()
     if not k_res.data or len(k_res.data) < req_qty:
         logger.error(f"Không đủ key cho đơn hàng {order_code}!")
@@ -89,20 +94,36 @@ async def process_order_success(order_code: int):
         keys.append(k["key_code"])
     
     all_keys_str = "\n".join(keys)
+    # 4. Cập nhật database
     supabase.table("orders").update({"status": "completed", "key_code": all_keys_str}).eq("id", order_code).execute()
     
-    # Gửi key
+    # 5. GỬI KEY CHO KHÁCH
     try:
         await telegram_app.bot.send_message(
-            o["user_id"], 
+            user_id, 
             f"🎉 Thanh toán thành công! Đơn hàng #{order_code}\nKey của bạn:\n" + "\n".join([f"<code>{k}</code>" for k in keys]), 
             parse_mode="HTML"
         )
-        logger.info(f"Đã gửi key cho đơn {order_code}")
-        return True
     except Exception as e:
-        logger.error(f"Không thể gửi Telegram: {e}")
-        return False
+        logger.error(f"Không thể gửi Telegram cho khách: {e}")
+
+    # 6. GỬI THÔNG BÁO (LOG) CHO ADMIN CÓ ĐẦY ĐỦ ID VÀ LINK LIÊN HỆ
+    admin_log_msg = (
+        f"✅ <b>ĐƠN HÀNG TỰ ĐỘNG THANH TOÁN #{order_code}</b>\n\n"
+        f"👤 Khách hàng: <b>{esc(u_name)}</b>\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"💬 <a href='tg://user?id={user_id}'>Bấm vào đây để nhắn tin cho khách</a>\n"
+        f"🎮 Sản phẩm: {esc(o['products']['name'])} (SL: {req_qty})\n"
+        f"🔑 Key đã giao:\n<code>{esc(all_keys_str)}</code>"
+    )
+    for ad in ADMIN_IDS:
+        if ad != 0:
+            try: 
+                await telegram_app.bot.send_message(ad, admin_log_msg, parse_mode="HTML")
+            except Exception as e: 
+                logger.error(f"Không thể gửi log cho admin {ad}: {e}")
+                
+    return True
 
 # ==================== GIAO DIỆN & LỆNH ADMIN ====================
 BTN_SHOP = "🛒 Mua Key"
@@ -136,6 +157,7 @@ def admin_panel_view():
     return "🛠 <b>Admin Panel</b>\nGõ /help để xem toàn bộ lệnh.", kb
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Lưu tên và ID vào db mỗi khi khách bấm start
     supabase.table("bot_users").upsert({"user_id": update.effective_user.id, "full_name": update.effective_user.full_name}).execute()
     await update.message.reply_text(f"Xin chào {esc(update.effective_user.first_name)}!\nBấm nút bên dưới để mua hàng.", reply_markup=reply_menu(update.effective_user.id))
 
@@ -303,7 +325,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
-            # Thêm nút Xác nhận chuyển khoản
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 Thanh toán ngay", url=payment_link.checkout_url)],
                 [InlineKeyboardButton("✅ Tôi đã chuyển khoản", callback_data=f"check_paid:{o_id}")],
@@ -330,7 +351,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Đang kiểm tra giao dịch với payOS...", show_alert=True)
         
         try:
-            # Gọi API lấy thông tin đơn hàng từ payOS
             async with httpx.AsyncClient() as client:
                 headers = {
                     "x-client-id": PAYOS_CLIENT_ID,
@@ -340,12 +360,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 res_data = res.json()
                 
                 if res_data.get("code") == "00" and res_data.get("data", {}).get("status") == "PAID":
-                    # Đã thanh toán, tiến hành nhả key
                     success = await process_order_success(o_id)
                     if success:
                         await query.message.edit_text(f"✅ Đơn hàng #{o_id} đã được xác nhận thanh toán và đã gửi key.", reply_markup=None)
                     else:
-                        await query.message.edit_text(f"⚠️ Đã thanh toán nhưng đang hết key trong kho. Vui lòng báo Admin!", reply_markup=None)
+                        await query.message.edit_text(f"⚠️ Đã thanh toán nhưng đang hết key. Vui lòng báo Admin!", reply_markup=None)
                 else:
                     await query.message.edit_text(
                         f"⏳ Hệ thống payOS báo đơn hàng <b>#{o_id}</b> chưa thanh toán thành công.\n"
@@ -369,7 +388,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, "🎟 <code>/addcoupon Mã | percent | Số_giảm</code>", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Quay lại", callback_data="admin_panel")]]))
         await query.answer()
 
-# ==================== WEBHOOK PAYOS (BẢN SỬA LỖI) ====================
+# ==================== WEBHOOK PAYOS ====================
 @app.post("/payos-webhook")
 async def payos_webhook(request: Request):
     logger.info("--- WEBHOOK ĐÃ ĐƯỢC GỌI ---")
@@ -378,10 +397,8 @@ async def payos_webhook(request: Request):
         body_str = body_bytes.decode("utf-8")
         data = json.loads(body_str)
         
-        # Xác minh chữ ký thủ công bằng HMAC-SHA256 để đảm bảo an toàn, không lỗi
         signature = data.get("signature")
         if signature:
-            # Bỏ các trường không cần thiết để tạo raw data giống payOS quy định
             data_to_check = {k: v for k, v in data.items() if k not in ["signature", "code", "desc"]}
             sorted_data = sorted(data_to_check.items())
             query_str = "&".join(f"{k}={v}" for k, v in sorted_data)
@@ -389,7 +406,7 @@ async def payos_webhook(request: Request):
             expected_sig = hmac.new(PAYOS_CHECKSUM_KEY.encode(), query_str.encode(), hashlib.sha256).hexdigest()
             if expected_sig != signature:
                 logger.error("Sai chữ ký Webhook!")
-                return JSONResponse(status_code=200, content={"code": "00", "desc": "success"}) # Vẫn trả 200 để payOS ko gửi lại
+                return JSONResponse(status_code=200, content={"code": "00", "desc": "success"}) 
         
         if data.get("code") == "00":
             order_code = data.get("data", {}).get("orderCode")
