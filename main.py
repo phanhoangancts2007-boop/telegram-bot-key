@@ -272,7 +272,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         o_id = order["id"]
         
         try:
-            # Gọi payOS để tạo link và lấy mã QR
+            # Gọi payOS để tạo link thanh toán
             payment_request = CreatePaymentLinkRequest(
                 order_code=o_id,
                 amount=total,
@@ -282,9 +282,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
-            # Lấy chuỗi QR từ payOS và render thành ảnh
-            qr_string = payment_link.qrCode 
-            img = qrcode.make(qr_string, border=2, box_size=8)
+            # Lấy link thanh toán từ payOS để render thành ảnh QR
+            # Lưu ý: SDK Python không trả về qrCode, nên ta dùng checkout_url
+            checkout_url = payment_link.checkout_url
+            
+            # Render link thành ảnh QR
+            img = qrcode.make(checkout_url, border=2, box_size=8)
             bio = BytesIO()
             img.save(bio, format="PNG")
             bio.seek(0)
@@ -295,13 +298,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"SP: <b>{esc(p['name'])}</b> (SL: <b>{qty}</b>)\n"
                 f"Tổng tiền: <b>{total:,}đ</b>\n\n"
                 f"💳 <b>Quét mã QR để thanh toán:</b>\n"
-                f"Nội dung CK: <code>DH{o_id}</code>\n\n"
                 f"<i>(Hệ thống sẽ tự động gửi Key sau khi thanh toán thành công)</i>"
             )
             
             # Nút dự phòng (nếu khách dùng máy tính không quét được QR)
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌐 Mở trang thanh toán", url=payment_link.checkout_url)],
+                [InlineKeyboardButton("🌐 Mở trang thanh toán", url=checkout_url)],
                 [InlineKeyboardButton("⬅️ Quay lại", callback_data="show_products")]
             ])
             
