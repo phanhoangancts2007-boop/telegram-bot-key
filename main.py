@@ -1,9 +1,10 @@
 import os
 import html
 import logging
+from io import BytesIO
 import datetime
 import asyncio
-from typing import Optional
+import qrcode
 
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
@@ -30,7 +31,7 @@ SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "0")
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_RAW.split(",") if id.strip().isdigit()]
 
-# Biến môi trường payOS (Cần thêm vào Render)
+# Biến môi trường payOS
 PAYOS_CLIENT_ID = os.environ.get("PAYOS_CLIENT_ID", "")
 PAYOS_API_KEY = os.environ.get("PAYOS_API_KEY", "")
 PAYOS_CHECKSUM_KEY = os.environ.get("PAYOS_CHECKSUM_KEY", "")
@@ -39,7 +40,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Khởi tạo payOS
+# Khởi tạo client payOS
 payos_client = AsyncPayOS(
     client_id=PAYOS_CLIENT_ID,
     api_key=PAYOS_API_KEY,
@@ -237,7 +238,7 @@ async def cmd_addmoney(update, context):
     except: pass
     await update.message.reply_text(f"✅ Đã cập nhật số dư cho {user_id}. Số dư mới: {new_bal:,}đ")
 
-# ==================== LUỒNG MUA HÀNG (PAYOS TỰ ĐỘNG) ====================
+# ==================== LUỒNG MUA HÀNG (PAYOS GỬI THẲNG QR) ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, data, user = update.callback_query, update.callback_query.data, update.callback_query.from_user
 
@@ -270,33 +271,53 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = supabase.table("orders").insert({"user_id": user.id, "product_id": p_id, "quantity": qty, "status": "pending", "total_amount": total}).execute().data[0]
         o_id = order["id"]
         
-        # Gọi payOS để tạo link thanh toán
         try:
+            # Gọi payOS để tạo link và lấy mã QR
             payment_request = CreatePaymentLinkRequest(
                 order_code=o_id,
                 amount=total,
                 description=f"Thanh toan don hang {o_id}",
-                cancel_url="https://t.me/your_bot_username", # Thay bằng link bot của bạn
-                return_url="https://t.me/your_bot_username"  # Thay bằng link bot của bạn
+                cancel_url="https://t.me/your_bot_username", 
+                return_url="https://t.me/your_bot_username"  
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
-            # Gửi link cho người dùng
+            # Lấy chuỗi QR từ payOS và render thành ảnh
+            qr_string = payment_link.qrCode 
+            img = qrcode.make(qr_string, border=2, box_size=8)
+            bio = BytesIO()
+            img.save(bio, format="PNG")
+            bio.seek(0)
+            bio.name = "qr.png"
+
+            caption = (
+                f"✅ <b>ĐƠN HÀNG #{o_id}</b>\n\n"
+                f"SP: <b>{esc(p['name'])}</b> (SL: <b>{qty}</b>)\n"
+                f"Tổng tiền: <b>{total:,}đ</b>\n\n"
+                f"💳 <b>Quét mã QR để thanh toán:</b>\n"
+                f"Nội dung CK: <code>DH{o_id}</code>\n\n"
+                f"<i>(Hệ thống sẽ tự động gửi Key sau khi thanh toán thành công)</i>"
+            )
+            
+            # Nút dự phòng (nếu khách dùng máy tính không quét được QR)
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 Thanh toán ngay", url=payment_link.checkout_url)],
+                [InlineKeyboardButton("🌐 Mở trang thanh toán", url=payment_link.checkout_url)],
                 [InlineKeyboardButton("⬅️ Quay lại", callback_data="show_products")]
             ])
-            await query.message.edit_text(
-                f"✅ Đã tạo đơn hàng <b>#{o_id}</b>\n"
-                f"SP: {esc(p['name'])} (SL: {qty})\n"
-                f"Tổng tiền: <b>{total:,}đ</b>\n\n"
-                f"Vui lòng bấm nút bên dưới để thanh toán qua payOS.",
-                reply_markup=kb,
+            
+            # Xóa tin nhắn text cũ và gửi ảnh QR mới
+            await query.message.delete()
+            await context.bot.send_photo(
+                chat_id=user.id, 
+                photo=bio, 
+                caption=caption, 
+                reply_markup=kb, 
                 parse_mode="HTML"
             )
+            
         except Exception as e:
             logger.error(f"Lỗi tạo link payOS: {e}")
-            await query.message.edit_text(f"❌ Có lỗi xảy ra khi tạo thanh toán. Vui lòng thử lại sau.")
+            await query.message.edit_text(f"❌ Có lỗi xảy ra: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
         
         await query.answer()
         return
