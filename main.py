@@ -36,11 +36,6 @@ PAYOS_CLIENT_ID = os.environ.get("PAYOS_CLIENT_ID", "")
 PAYOS_API_KEY = os.environ.get("PAYOS_API_KEY", "")
 PAYOS_CHECKSUM_KEY = os.environ.get("PAYOS_CHECKSUM_KEY", "")
 
-# Dự phòng nếu payOS không trả về thông tin bank
-BANK_BIN = os.environ.get("BANK_BIN", "970422") # MB Bank
-ACCOUNT_NUMBER = os.environ.get("ACCOUNT_NUMBER", "")
-ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 telegram_app = Application.builder().token(BOT_TOKEN).build()
@@ -51,23 +46,6 @@ payos_client = AsyncPayOS(
     api_key=PAYOS_API_KEY,
     checksum_key=PAYOS_CHECKSUM_KEY
 )
-
-# ==================== HÀM TẠO VIETQR ====================
-def _tlv(tag, val): return f"{tag}{len(val):02d}{val}"
-
-def _crc16(data):
-    crc = 0xFFFF
-    for b in data.encode():
-        crc ^= b << 8
-        for _ in range(8): crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else (crc << 1)
-        crc &= 0xFFFF
-    return f"{crc:04X}"
-
-def vietqr_payload(amount, content, bank_bin, acc_num):
-    bank = _tlv("00", bank_bin) + _tlv("01", acc_num)
-    merchant = _tlv("00", "A000000727") + _tlv("01", bank) + _tlv("02", "QRIBFTTA")
-    p = _tlv("00", "01") + _tlv("01", "12") + _tlv("38", merchant) + _tlv("53", "704") + _tlv("54", str(amount)) + _tlv("58", "VN") + _tlv("62", _tlv("08", content)) + "6304"
-    return p + _crc16(p)
 
 # ==================== HÀM CƠ BẢN ====================
 def is_admin(user_id: int) -> bool: return user_id in ADMIN_IDS
@@ -260,7 +238,7 @@ async def cmd_addmoney(update, context):
     except: pass
     await update.message.reply_text(f"✅ Đã cập nhật số dư cho {user_id}. Số dư mới: {new_bal:,}đ")
 
-# ==================== LUỒNG MUA HÀNG (GỬI ẢNH QR VIETQR) ====================
+# ==================== LUỒNG MUA HÀNG (QR CHUẨN PAYOS) ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, data, user = update.callback_query, update.callback_query.data, update.callback_query.from_user
 
@@ -304,35 +282,44 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
-            # Lấy thông tin ngân hàng từ payOS (nếu payOS trả về), nếu không lấy từ biến môi trường
-            bin_code = getattr(payment_link, 'bin', None) or BANK_BIN
-            acc_num = getattr(payment_link, 'accountNumber', None) or ACCOUNT_NUMBER
+            # Lấy chuỗi QR gốc từ payOS (trường qr_code)
+            qr_string = getattr(payment_link, 'qr_code', None)
             
-            # Tạo mã VietQR chuẩn
-            qr_payload = vietqr_payload(total, f"DH{o_id}", bin_code, acc_num)
-            img = qrcode.make(qr_payload, border=2, box_size=8)
+            if qr_string:
+                img = qrcode.make(qr_string, border=2, box_size=8)
+            else:
+                # Fallback tự sinh mã QR nếu payOS không trả về (hiếm gặp)
+                import qrcode.image.pil
+                img = qrcode.make(payment_link.checkout_url, border=2, box_size=8)
             
             bio = BytesIO()
             img.save(bio, format="PNG")
             bio.seek(0)
             bio.name = "qr.png"
 
+            # Lấy thông tin hiển thị text cho giống payOS
+            bank_name = getattr(payment_link, 'bin', 'Ngân hàng')
+            stk = getattr(payment_link, 'account_number', '')
+            acc_name = getattr(payment_link, 'account_name', '')
+            desc = getattr(payment_link, 'description', f"DH{o_id}")
+
             caption = (
                 f"✅ <b>ĐƠN HÀNG #{o_id}</b>\n\n"
                 f"SP: <b>{esc(p['name'])}</b> (SL: <b>{qty}</b>)\n"
                 f"Tổng tiền: <b>{total:,}đ</b>\n\n"
                 f"💳 <b>Quét mã VietQR để thanh toán:</b>\n"
-                f"Nội dung CK: <code>DH{o_id}</code>\n\n"
+                f"Ngân hàng: {esc(bank_name)}\n"
+                f"STK: <code>{esc(stk)}</code>\n"
+                f"Chủ TK: {esc(acc_name)}\n"
+                f"Nội dung CK: <code>{esc(desc)}</code>\n\n"
                 f"<i>(Hệ thống sẽ tự động gửi Key sau khi thanh toán thành công)</i>"
             )
             
-            # Nút dự phòng mở trang thanh toán payOS
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🌐 Mở trang thanh toán", url=payment_link.checkout_url)],
                 [InlineKeyboardButton("⬅️ Quay lại", callback_data="show_products")]
             ])
             
-            # Xóa tin nhắn chọn số lượng và gửi ảnh QR mới
             await query.message.delete()
             await context.bot.send_photo(
                 chat_id=user.id, 
