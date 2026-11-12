@@ -4,7 +4,8 @@ import logging
 import datetime
 import asyncio
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -236,7 +237,7 @@ async def cmd_addmoney(update, context):
     except: pass
     await update.message.reply_text(f"✅ Đã cập nhật số dư cho {user_id}. Số dư mới: {new_bal:,}đ")
 
-# ==================== LUỒNG MUA HÀNG (CHỈ GỬI LINK) ====================
+# ==================== LUỒNG MUA HÀNG ====================
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query, data, user = update.callback_query, update.callback_query.data, update.callback_query.from_user
 
@@ -274,9 +275,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             payment_request = CreatePaymentLinkRequest(
                 order_code=o_id,
                 amount=total,
-                description=f"Thanh toan don hang {o_id}",
-                cancel_url="https://t.me/your_bot_username", 
-                return_url="https://t.me/your_bot_username"  
+                description=f"Thanh toan DH{o_id}",
+                cancel_url="https://t.me/fo4cauthu_bot", 
+                return_url="https://t.me/fo4cauthu_bot"  
             )
             payment_link = await payos_client.payment_requests.create(payment_request)
             
@@ -320,17 +321,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def payos_webhook(request: Request):
     try:
         body = await request.body()
+        
         # Xác minh chữ ký
         webhook_data = payos_client.webhooks.verify(body)
         
+        # Kiểm tra mã code thành công
         if webhook_data.code == "00":
-            order_code = webhook_data.order_code
+            # Lấy order_code từ object data
+            order_code = webhook_data.data.orderCode
             logger.info(f"Nhận thanh toán thành công cho đơn hàng: {order_code}")
             
             # Lấy thông tin đơn hàng
             o_res = supabase.table("orders").select("*, products(name)").eq("id", order_code).eq("status", "pending").execute()
             if not o_res.data:
-                return {"code": "00", "desc": "success"}
+                return JSONResponse(status_code=200, content={"code": "00", "desc": "success"})
             
             o = o_res.data[0]
             req_qty = o.get("quantity", 1)
@@ -339,7 +343,7 @@ async def payos_webhook(request: Request):
             k_res = supabase.table("keys").select("id, key_code").eq("product_id", o["product_id"]).eq("is_sold", False).limit(req_qty).execute()
             if not k_res.data or len(k_res.data) < req_qty:
                 logger.error(f"Không đủ key cho đơn hàng {order_code}!")
-                return {"code": "00", "desc": "success"}
+                return JSONResponse(status_code=200, content={"code": "00", "desc": "success"})
             
             keys = []
             for k in k_res.data:
@@ -359,10 +363,13 @@ async def payos_webhook(request: Request):
             except Exception as e:
                 logger.error(f"Không thể gửi tin nhắn Telegram: {e}")
         
-        return {"code": "00", "desc": "success"}
+        # Luôn trả về 200 OK để payOS biết là đã nhận thành công
+        return JSONResponse(status_code=200, content={"code": "00", "desc": "success"})
+        
     except Exception as e:
         logger.error(f"Lỗi xử lý webhook: {e}")
-        raise HTTPException(status_code=400, detail="Invalid webhook")
+        # Kể cả khi code có lỗi, vẫn phải trả về 200 để payOS không đánh dấu webhook bị lỗi
+        return JSONResponse(status_code=200, content={"code": "00", "desc": "success"})
 
 # ==================== ĐĂNG KÝ & CHẠY ====================
 telegram_app.add_handler(CommandHandler("start", cmd_start))
