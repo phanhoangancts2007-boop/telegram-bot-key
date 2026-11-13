@@ -18,7 +18,6 @@ from telegram.ext import (
 )
 from supabase import create_client, Client
 
-# Import SDK payOS
 from payos import AsyncPayOS
 from payos.types import CreatePaymentLinkRequest
 
@@ -30,11 +29,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "0")
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_RAW.split(",") if id.strip().isdigit()]
 
-# Biến môi trường payOS
 PAYOS_CLIENT_ID = os.environ.get("PAYOS_CLIENT_ID", "")
 PAYOS_API_KEY = os.environ.get("PAYOS_API_KEY", "")
 PAYOS_CHECKSUM_KEY = os.environ.get("PAYOS_CHECKSUM_KEY", "")
@@ -54,8 +51,10 @@ def is_admin(user_id: int) -> bool: return user_id in ADMIN_IDS
 def esc(s) -> str: return html.escape(str(s or ""))
 
 def stock_of(product_id):
-    res = supabase.table("keys").select("id", count="exact").eq("product_id", product_id).eq("is_sold", False).execute()
-    return res.count or 0
+    try:
+        res = supabase.table("keys").select("id", count="exact").eq("product_id", product_id).eq("is_sold", False).execute()
+        return res.count or 0
+    except: return 0
 
 def is_maintenance():
     try:
@@ -68,9 +67,8 @@ async def safe_edit(query, text, kb=None):
     except BadRequest as e:
         if "not modified" not in str(e).lower(): await query.message.reply_text(text, reply_markup=kb, parse_mode="HTML")
 
-# ==================== HÀM XỬ LÝ ĐƠN HÀNG (2 CHIỀU) ====================
+# ==================== HÀM XỬ LÝ ĐƠN HÀNG ====================
 async def process_order_success(order_code: int):
-    # 1. Khóa đơn hàng bằng trạng thái processing
     update_res = supabase.table("orders").update({"status": "processing"}).eq("id", order_code).eq("status", "pending").execute()
     if not update_res.data: return False
     
@@ -84,11 +82,9 @@ async def process_order_success(order_code: int):
     u_res = supabase.table("bot_users").select("full_name").eq("user_id", user_id).execute()
     u_name = u_res.data[0]["full_name"] if u_res.data else "Không rõ tên"
 
-    # 2. Lấy key
     k_res = supabase.table("keys").select("id, key_code").eq("product_id", o["product_id"]).eq("is_sold", False).limit(req_qty).execute()
     
     if not k_res.data or len(k_res.data) < req_qty:
-        logger.error(f"Không đủ key cho đơn hàng {order_code}!")
         supabase.table("orders").update({"status": "pending"}).eq("id", order_code).execute()
         return False
     
@@ -100,26 +96,18 @@ async def process_order_success(order_code: int):
     keys_formatted = "\n".join([f"<code>{esc(k)}</code>" for k in keys])
     all_keys_str = "\n".join(keys)
     
-    # 3. Cập nhật database thành công
     supabase.table("orders").update({"status": "completed", "key_code": all_keys_str}).eq("id", order_code).execute()
     
-    # 4. Gửi key cho khách
     try:
-        await telegram_app.bot.send_message(
-            user_id, 
-            f"🎉 Thanh toán thành công! Đơn hàng #{order_code}\nKey của bạn:\n{keys_formatted}", 
-            parse_mode="HTML"
-        )
+        await telegram_app.bot.send_message(user_id, f"🎉 Thanh toán thành công! Đơn hàng #{order_code}\nKey của bạn:\n{keys_formatted}", parse_mode="HTML")
         await asyncio.sleep(0.5)
-    except Exception as e:
-        logger.error(f"Không thể gửi Telegram cho khách: {e}")
+    except Exception as e: pass
 
-    # 5. Gửi log cho Admin
     admin_log_msg = (
         f"✅ <b>ĐƠN HÀNG THANH TOÁN #{order_code}</b>\n\n"
         f"👤 Khách hàng: <b>{esc(u_name)}</b>\n"
         f"🆔 ID: <code>{user_id}</code>\n"
-        f"💬 <a href='tg://user?id={user_id}'>Bấm vào đây để nhắn tin cho khách</a>\n"
+        f"💬 <a href='tg://user?id={user_id}'>Nhắn tin cho khách</a>\n"
         f"🎮 Sản phẩm: {esc(p_name)} (SL: {req_qty})\n"
         f"🔑 Key đã giao:\n{keys_formatted}"
     )
@@ -128,8 +116,7 @@ async def process_order_success(order_code: int):
             try: 
                 await telegram_app.bot.send_message(ad, admin_log_msg, parse_mode="HTML")
                 await asyncio.sleep(0.5)
-            except Exception as e: 
-                logger.error(f"Không thể gửi log cho admin {ad}: {e}")
+            except: pass
     return True
 
 # ==================== GIAO DIỆN ====================
@@ -187,6 +174,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👉 <code>/delkey key_code</code> (Xóa 1 key lỗi)\n"
         "👉 <code>/stock</code> (Xem tồn kho)\n\n"
         "<b>🧾 QUẢN LÝ ĐƠN HÀNG & KHÁCH</b>\n"
+        "👉 <code>/duyet Ma_Don</code> (Duyệt tay nếu lỗi auto)\n"
         "👉 <code>/sold</code> (Xem 10 đơn gần nhất)\n"
         "👉 <code>/find Mã_Đơn</code> (Xem chi tiết & nhắn tin)\n"
         "👉 <code>/check ID_Khách</code> (Xem lịch sử chi tiêu)\n"
@@ -252,10 +240,8 @@ async def cmd_delkey(update, context):
     if len(context.args) != 1: return await update.message.reply_text("Cú pháp: /delkey Mã_Key")
     key = context.args[0]
     res = supabase.table("keys").delete().eq("key_code", key).execute()
-    if res.data:
-        await update.message.reply_text(f"🗑 Đã xóa key <code>{esc(key)}</code> khỏi kho.", parse_mode="HTML")
-    else:
-        await update.message.reply_text(f"❌ Không tìm thấy key này.")
+    if res.data: await update.message.reply_text(f"🗑 Đã xóa key <code>{esc(key)}</code> khỏi kho.", parse_mode="HTML")
+    else: await update.message.reply_text(f"❌ Không tìm thấy key này.")
 
 async def cmd_stock(update, context):
     if not is_admin(update.effective_user.id): return
@@ -265,27 +251,67 @@ async def cmd_stock(update, context):
     await update.message.reply_text(text, parse_mode="HTML")
 
 # --- ĐƠN HÀNG & KHÁCH ---
+async def cmd_duyet(update, context):
+    if not is_admin(update.effective_user.id) or len(context.args) != 1: 
+        return await update.message.reply_text("Cú pháp: /duyet Mã_Đơn")
+    try: o_id = int(context.args[0])
+    except: return await update.message.reply_text("Mã đơn phải là số.")
+    
+    success = await process_order_success(o_id)
+    if success: await update.message.reply_text(f"✅ Đã duyệt thủ công đơn #{o_id} và gửi key cho khách.")
+    else: await update.message.reply_text(f"❌ Lỗi: Đơn #{o_id} không ở trạng thái chờ, hoặc đã hết key trong kho.")
+
+# --- ĐÃ TỐI ƯU LẠI HÀM SOLD ---
 async def cmd_sold(update, context):
     if not is_admin(update.effective_user.id): return
-    res = supabase.table("orders").select("*, products(name)").eq("status", "completed").order("created_at", desc=True).limit(10).execute()
-    if not res.data: return await update.message.reply_text("Chưa có đơn hàng nào được bán.")
+    
+    try:
+        # Lấy 10 đơn hoàn thành gần nhất
+        res = supabase.table("orders").select("*").eq("status", "completed").order("created_at", desc=True).limit(10).execute()
+        if not res.data: 
+            return await update.message.reply_text("Chưa có đơn hàng nào được bán.")
+            
+        orders = res.data
         
-    text = "🧾 <b>10 ĐƠN HÀNG GẦN NHẤT</b>\n\n"
-    for o in res.data:
-        u_res = supabase.table("bot_users").select("full_name").eq("user_id", o["user_id"]).execute()
-        u_name = u_res.data[0]["full_name"] if u_res.data else "N/A"
-        keys_list = o.get('key_code', '').split('\n')
-        keys_preview = f"<code>{esc(keys_list[0])}</code>" if keys_list else "Không có"
-        if len(keys_list) > 1: keys_preview += f" (+{len(keys_list)-1} key)"
+        # Gom tất cả user_id và product_id lại để truy vấn 1 lần (tránh lag)
+        user_ids = list(set([o["user_id"] for o in orders]))
+        product_ids = list(set([o["product_id"] for o in orders]))
         
-        text += f"<b>Đơn #{o['id']}</b> - {esc(u_name)}\n└ SP: {esc(o['products']['name'])}\n└ Key: {keys_preview}\n\n"
-    await update.message.reply_text(text, parse_mode="HTML")
+        users_res = supabase.table("bot_users").select("user_id, full_name").in_("user_id", user_ids).execute()
+        user_map = {u["user_id"]: u["full_name"] for u in users_res.data} if users_res.data else {}
+        
+        prods_res = supabase.table("products").select("id, name").in_("id", product_ids).execute()
+        prod_map = {p["id"]: p["name"] for p in prods_res.data} if prods_res.data else {}
+
+        text = "🧾 <b>10 ĐƠN HÀNG GẦN NHẤT</b>\n\n"
+        for o in orders:
+            u_name = user_map.get(o["user_id"], "Khách")
+            p_name = prod_map.get(o["product_id"], "SP đã xóa")
+            
+            key_code = o.get('key_code') or ''
+            keys_list = key_code.split('\n') if key_code else []
+            keys_preview = f"<code>{esc(keys_list[0])}</code>" if keys_list else "Không có"
+            if len(keys_list) > 1: 
+                keys_preview += f" (+{len(keys_list)-1} key)"
+                
+            total = o.get('total_amount', 0) or 0
+            
+            text += (
+                f"<b>Đơn #{o['id']}</b> - {esc(u_name)}\n"
+                f"└ SP: {esc(p_name)} (SL: {o.get('quantity', 1)})\n"
+                f"└ Tổng: <b>{total:,}đ</b>\n"
+                f"└ Key: {keys_preview}\n\n"
+            )
+        await update.message.reply_text(text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Lỗi cmd_sold: {e}")
+        await update.message.reply_text(f"❌ Lỗi tải danh sách đơn: {e}")
 
 async def cmd_find(update, context):
     if not is_admin(update.effective_user.id) or len(context.args) != 1: return
     try: o_id = int(context.args[0])
     except: return await update.message.reply_text("Mã đơn phải là số.")
-        
+    
     res = supabase.table("orders").select("*, products(name)").eq("id", o_id).execute()
     if not res.data: return await update.message.reply_text("❌ Không thấy đơn.")
     o = res.data[0]
@@ -293,20 +319,24 @@ async def cmd_find(update, context):
     u_res = supabase.table("bot_users").select("full_name").eq("user_id", o["user_id"]).execute()
     u_name = u_res.data[0]["full_name"] if u_res.data else "N/A"
     
+    p_name = o['products']['name'] if o.get('products') else "SP đã xóa"
+    created_at = o.get('created_at', '')[:16] if o.get('created_at') else "N/A"
+    
     text = (
         f"🔍 <b>THÔNG TIN ĐƠN HÀNG #{o['id']}</b>\n\n"
         f"👤 Khách: <b>{esc(u_name)}</b>\n"
         f"🆔 ID: <code>{o['user_id']}</code>\n"
-        f"🎮 SP: {esc(o['products']['name'])} (SL: {o['quantity']})\n"
+        f"🎮 SP: {esc(p_name)} (SL: {o.get('quantity', 1)})\n"
         f"💰 Tổng: {o.get('total_amount', 0):,}đ\n"
-        f"📅 Ngày: {o['created_at'][:16]}\n"
+        f"📅 Ngày: {created_at}\n"
         f"📌 Trạng thái: <b>{o['status']}</b>\n\n"
     )
     
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Nhắn tin cho khách", url=f"tg://user?id={o['user_id']}")]])
     
-    if o.get('key_code'):
-        keys_split = o['key_code'].split('\n')
+    key_code = o.get('key_code') or ''
+    if key_code:
+        keys_split = key_code.split('\n')
         text += f"🔑 Key đã giao:\n" + "\n".join([f"<code>{esc(k)}</code>" for k in keys_split])
         if len(keys_split) > 5:
             text = text.replace("🔑 Key đã giao:\n", "🔑 Key đã giao (5 key đầu):\n")
@@ -366,6 +396,7 @@ async def cmd_top(update, context):
     
     counts = {}
     for o in res.data:
+        if not o.get('products'): continue
         p_name = o["products"]["name"]
         counts[p_name] = counts.get(p_name, 0) + o["quantity"]
     
@@ -432,6 +463,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = supabase.table("orders").insert({"user_id": user.id, "product_id": p_id, "quantity": qty, "status": "pending", "total_amount": total}).execute().data[0]
         o_id = order["id"]
         
+        admin_notice = (
+            f"🔔 <b>CÓ ĐƠN HÀNG MỚI CHỜ THANH TOÁN</b>\n\n"
+            f"🆔 Đơn: <b>#{o_id}</b>\n"
+            f"👤 Khách: <a href='tg://user?id={user.id}'>{esc(user.full_name)}</a>\n"
+            f"🎮 SP: {esc(p['name'])} (SL: {qty})\n"
+            f"💰 Tổng: <b>{total:,}đ</b>\n\n"
+            f"<i>(Nếu khách báo đã CK mà bot chưa nhả, gõ lệnh /duyet {o_id})</i>"
+        )
+        for ad in ADMIN_IDS:
+            if ad != 0:
+                try: await context.bot.send_message(ad, admin_notice, parse_mode="HTML")
+                except: pass
+        
         try:
             payment_request = CreatePaymentLinkRequest(
                 order_code=o_id,
@@ -481,8 +525,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await query.message.edit_text(f"⚠️ Đã thanh toán nhưng đang hết key hoặc đơn đang được xử lý. Vui lòng báo Admin!", reply_markup=None)
                 else:
                     await query.message.edit_text(
-                        f"⏳ Hệ thống payOS báo đơn hàng <b>#{o_id}</b> chưa thanh toán thành công.\nVui lòng chuyển khoản thành công rồi thử lại.",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Thử lại", callback_data=f"check_paid:{o_id}")]])
+                        f"⏳ Hệ thống payOS đang đối soát giao dịch <b>#{o_id}</b> (có thể mất 1-2 phút).\n"
+                        f"Nếu bạn đã chuyển thành công, vui lòng bấm lại sau ít phút, hoặc nhắn tin cho Admin để được duyệt ngay.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 Thử lại", callback_data=f"check_paid:{o_id}")],
+                            [InlineKeyboardButton("💬 Liên hệ Admin", url="https://t.me/xonnchamuser")]
+                        ])
                     )
         except Exception as e:
             logger.error(f"Lỗi kiểm tra thanh toán: {e}")
@@ -538,13 +586,14 @@ telegram_app.add_handler(CommandHandler("setprice", cmd_setprice))
 telegram_app.add_handler(CommandHandler("setname", cmd_setname))
 telegram_app.add_handler(CommandHandler("delprod", cmd_delprod))
 telegram_app.add_handler(CommandHandler("addkey", cmd_addkey))
-telegram_app.add_handler(CommandHandler("delkey", cmd_delkey)) # Lệnh mới
+telegram_app.add_handler(CommandHandler("delkey", cmd_delkey))
 telegram_app.add_handler(CommandHandler("stock", cmd_stock))
 telegram_app.add_handler(CommandHandler("stats", cmd_stats))
-telegram_app.add_handler(CommandHandler("top", cmd_top)) # Lệnh mới
+telegram_app.add_handler(CommandHandler("top", cmd_top))
 telegram_app.add_handler(CommandHandler("sold", cmd_sold))
 telegram_app.add_handler(CommandHandler("find", cmd_find))
-telegram_app.add_handler(CommandHandler("check", cmd_check)) # Lệnh mới
+telegram_app.add_handler(CommandHandler("check", cmd_check))
+telegram_app.add_handler(CommandHandler("duyet", cmd_duyet))
 telegram_app.add_handler(CommandHandler("addcoupon", cmd_addcoupon))
 telegram_app.add_handler(CommandHandler("maintenance", cmd_maintenance))
 telegram_app.add_handler(CommandHandler("broadcast", cmd_broadcast))
